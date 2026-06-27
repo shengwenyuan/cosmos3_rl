@@ -6,11 +6,11 @@
     "golden_mse_max": 0.05,
     "golden_psnr_min": 14.0
   },
-  "fps": 5,
+  "fps": 15,
   "image_size": 480,
   "view_point": "ego_view",
   "model_mode": "policy",
-  "name": "action_policy_robot",
+  "name": "action_policy_robot_t1",
   "prompt": "Put the pot to the left of the purple item.",
   "seed": 0,
   "vision_path": "bridge_20260501_0.mp4",
