@@ -27,6 +27,7 @@ init_script()
 
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -304,6 +305,8 @@ class RobolabServerArgs(pydantic.BaseModel):
     """If set, allow direct DCP/S3 checkpoint loading instead of requiring a consolidated safetensors export."""
     experiment: str | None = None
     """Experiment name for DCP checkpoints using module configs, e.g. droid_lerobot_8b_policy."""
+    config_file: str | None = None
+    """Optional config file forwarded to OmniSetup, e.g. <dcp>/model/config.json."""
     experiment_overrides: list[str] = pydantic.Field(default_factory=list)
     """Hydra experiment overrides forwarded to OmniSetup for DCP checkpoint loading."""
     credential_path: str | None = None
@@ -317,6 +320,8 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Action domain name passed to get_domain_id()."""
     decode_video: bool = False
     """If set, decode and return the predicted rollout video as a uint8 NumPy array."""
+    guardrails: bool = False
+    """Enable text/video guardrails. Disabled by default for action-only policy serving."""
 
     output_dir: Path | None = None
     """Output directory for OmniInference. Defaults to /tmp/cosmos3_action_server/robolab."""
@@ -421,9 +426,12 @@ class RobolabPolicyService:
             "checkpoint_path": args.checkpoint_path,
             "output_dir": args.output_dir or _DEFAULT_ROBOLAB_OUTPUT_DIR,
             "sampler": args.sampler,
+            "guardrails": args.guardrails,
         }
         if args.experiment is not None:
             setup_overrides["experiment"] = args.experiment
+        if args.config_file is not None:
+            setup_overrides["config_file"] = args.config_file
         if args.experiment_overrides:
             setup_overrides["experiment_overrides"] = list(args.experiment_overrides)
         if args.credential_path is not None:
@@ -555,11 +563,17 @@ class RobolabPolicyService:
         return self._transform(sample, self.cfg.resolution)
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
+        infer_start = time.perf_counter()
         sample = self._build_sample(obs)
         data_batch = _build_data_batch_from_sample(sample)
         seed = self._next_seed()
-        log.info(f"[robolab-policy-server] prompt={data_batch['ai_caption'][0]!r} seed={seed}")
+        log.info(
+            f"[robolab-policy-server] inference_chunk_start seed={seed} "
+            f"chunk={self.cfg.action_chunk_size} num_steps={self.cfg.num_steps} "
+            f"shift={self.cfg.shift} guidance={self.cfg.guidance} prompt={data_batch['ai_caption'][0]!r}"
+        )
 
+        generate_start = time.perf_counter()
         with self._lock:
             with torch.inference_mode():
                 samples = self.model.generate_samples_from_batch(
@@ -569,6 +583,7 @@ class RobolabPolicyService:
                     num_steps=self.cfg.num_steps,
                     shift=self.cfg.shift,
                 )
+        generate_elapsed = time.perf_counter() - generate_start
 
         action = samples["action"][0][:, : self.cfg.action_dim]  # [T,D]
         action = action[self.cfg.history_length :]  # [T2,D]
@@ -597,6 +612,11 @@ class RobolabPolicyService:
             video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]
             video = ((video[0].clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8).permute(1, 2, 3, 0)  # [T,H,W,3]
             outputs["video"] = video.detach().cpu().numpy()
+        log.info(
+            f"[robolab-policy-server] inference_chunk_end seed={seed} "
+            f"elapsed_s={time.perf_counter() - infer_start:.3f} generate_s={generate_elapsed:.3f} "
+            f"action_shape={tuple(action_np.shape)}"
+        )
         return outputs
 
 
