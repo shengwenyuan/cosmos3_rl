@@ -4,6 +4,7 @@
 import hashlib
 import json
 import pickle
+import time
 from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,13 @@ UpsampleTask = Literal["t2i", "t2v", "i2v"]
 
 
 _BatchItem = TypeVar("_BatchItem")
+_MINE_MARKER = "MINE_div"
+
+
+def _log_mine(stage: str, event: str, **fields: Any) -> None:
+    field_text = " ".join(f"{key}={value!r}" for key, value in fields.items())
+    suffix = f" {field_text}" if field_text else ""
+    log.info(f"{_MINE_MARKER} stage={stage} event={event}{suffix}", rank0_only=False)
 
 
 def _iter_packed_batches(
@@ -982,12 +990,47 @@ class SampleDataset(Dataset):
         return len(self._sample_args_list)
 
     def __getitem__(self, idx: int) -> tuple[SampleArgs, dict[str, Any]]:
+        total_start = time.perf_counter()
         sample_args = self._sample_args_list[idx]
         assert isinstance(sample_args, OmniSampleArgs)
         assert sample_args.output_dir is not None
+        _log_mine(
+            "sample_dataset_getitem",
+            "start",
+            idx=idx,
+            name=sample_args.name,
+            model_mode=sample_args.model_mode.value,
+            output_dir=str(sample_args.output_dir),
+        )
+        get_data_start = time.perf_counter()
+        _log_mine("sample_dataset_getitem", "sample_args_get_data_start", idx=idx)
         data_batch = sample_args.get_data(device="cuda")
+        _log_mine(
+            "sample_dataset_getitem",
+            "sample_args_get_data_end",
+            idx=idx,
+            has_data=bool(data_batch),
+            keys=sorted(data_batch.keys()) if data_batch else [],
+            elapsed_s=f"{time.perf_counter() - get_data_start:.3f}",
+        )
         if not data_batch:
+            sample_data_start = time.perf_counter()
+            _log_mine("sample_dataset_getitem", "get_sample_data_start", idx=idx)
             data_batch = get_sample_data(sample_args=sample_args, model=self._model)
+            _log_mine(
+                "sample_dataset_getitem",
+                "get_sample_data_end",
+                idx=idx,
+                keys=sorted(data_batch.keys()),
+                elapsed_s=f"{time.perf_counter() - sample_data_start:.3f}",
+            )
+        _log_mine(
+            "sample_dataset_getitem",
+            "end",
+            idx=idx,
+            keys=sorted(data_batch.keys()),
+            elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+        )
         return sample_args, data_batch
 
 
@@ -1028,6 +1071,15 @@ class OmniInference(Inference):
         assert isinstance(setup_args, OmniSetupArgs)
         assert setup_args.output_dir is not None
 
+        total_start = time.perf_counter()
+        _log_mine(
+            "omni_inference_create",
+            "start",
+            checkpoint_path=str(setup_args.checkpoint_path),
+            checkpoint_type=setup_args.checkpoint_type.value,
+            config_file_type=setup_args.config_file_type.value,
+            output_dir=str(setup_args.output_dir),
+        )
         sampler_override = setup_args.sampler
         parallelism_config = cls._get_parallelism_config(setup_args)
         compile_config = cls._get_compile_config(setup_args)
@@ -1040,7 +1092,22 @@ class OmniInference(Inference):
             if not setup_args.config_file:
                 raise ValueError("'config_file' is required")
 
+            before_start = time.perf_counter()
+            _log_mine("omni_inference_create", "before_load_model_start")
             Cosmos3OmniModel.before_load_model()
+            _log_mine(
+                "omni_inference_create",
+                "before_load_model_end",
+                elapsed_s=f"{time.perf_counter() - before_start:.3f}",
+            )
+            load_start = time.perf_counter()
+            _log_mine(
+                "omni_inference_create",
+                "load_model_from_checkpoint_start",
+                checkpoint_path=str(setup_args.checkpoint_path),
+                experiment=setup_args.experiment,
+                config_file=str(setup_args.config_file),
+            )
             model, config = load_model_from_checkpoint(
                 experiment_name=setup_args.experiment,
                 config_file=setup_args.config_file,
@@ -1056,16 +1123,52 @@ class OmniInference(Inference):
                 use_cache_checkpoint=setup_args.checkpoint_cache_dir is not None,
                 cache_checkpoint_rootdir=str(setup_args.checkpoint_cache_dir or ""),
             )
+            _log_mine(
+                "omni_inference_create",
+                "load_model_from_checkpoint_end",
+                elapsed_s=f"{time.perf_counter() - load_start:.3f}",
+            )
             model = cast("OmniMoTModel", model)
+            after_start = time.perf_counter()
+            _log_mine("omni_inference_create", "after_load_model_start")
             Cosmos3OmniModel.after_load_model(model)
+            _log_mine(
+                "omni_inference_create",
+                "after_load_model_end",
+                elapsed_s=f"{time.perf_counter() - after_start:.3f}",
+            )
+            save_start = time.perf_counter()
+            _log_mine("omni_inference_create", "save_config_start", output_dir=str(setup_args.output_dir))
             save_config(config, setup_args.output_dir)
+            _log_mine(
+                "omni_inference_create",
+                "save_config_end",
+                elapsed_s=f"{time.perf_counter() - save_start:.3f}",
+            )
         else:
+            download_start = time.perf_counter()
+            _log_mine("omni_inference_create", "download_checkpoint_start")
             checkpoint_path = setup_args.download_checkpoint()
+            _log_mine(
+                "omni_inference_create",
+                "download_checkpoint_end",
+                checkpoint_path=str(checkpoint_path),
+                elapsed_s=f"{time.perf_counter() - download_start:.3f}",
+            )
             if setup_args.config_file_type == ConfigFileType.MODULE:
                 config = None
+                _log_mine("omni_inference_create", "module_config_selected")
             else:
+                config_start = time.perf_counter()
+                _log_mine("omni_inference_create", "load_model_config_dict_start")
                 model_dict = setup_args.load_model_config_dict()
+                _log_mine(
+                    "omni_inference_create",
+                    "load_model_config_dict_end",
+                    elapsed_s=f"{time.perf_counter() - config_start:.3f}",
+                )
                 if setup_args.vlm_processor_from_checkpoint:
+                    _log_mine("omni_inference_create", "vlm_processor_from_checkpoint_start")
                     # Source the VLM processor from the loaded checkpoint's own
                     # bundled files instead of the repository hardcoded in the
                     # model config. Drops the redundant base-model download.
@@ -1074,6 +1177,7 @@ class OmniInference(Inference):
                     tokenizer_cfg.pop("revision", None)
                     tokenizer_cfg.pop("subdir", None)
                     tokenizer_cfg["tokenizer_type"] = str(checkpoint_path)
+                    _log_mine("omni_inference_create", "vlm_processor_from_checkpoint_end")
                 # AVAE source: the configured ``avae_path`` when set, else the loaded
                 # checkpoint's bundled ``sound_tokenizer/``. The inference-only
                 # ``from_checkpoint`` key (default False) forces bundled; pop it so it
@@ -1088,23 +1192,59 @@ class OmniInference(Inference):
                             _materialize_avae_ckpt,
                         )
 
+                        avae_start = time.perf_counter()
+                        _log_mine(
+                            "omni_inference_create",
+                            "materialize_avae_start",
+                            sound_tokenizer_dir=str(sound_tokenizer_dir),
+                        )
                         _materialize_avae_ckpt(str(sound_tokenizer_dir))
+                        _log_mine(
+                            "omni_inference_create",
+                            "materialize_avae_end",
+                            elapsed_s=f"{time.perf_counter() - avae_start:.3f}",
+                        )
                         sound_cfg["bucket_name"] = ""
                         sound_cfg["avae_path"] = str(sound_tokenizer_dir / _AVAE_LEGACY_CKPT_NAME)
                 config = Cosmos3OmniConfig(model=model_dict)
+            model_start = time.perf_counter()
+            _log_mine(
+                "omni_inference_create",
+                "from_pretrained_dcp_start",
+                checkpoint_path=str(checkpoint_path),
+                config_provided=config is not None,
+            )
             model = Cosmos3OmniModel.from_pretrained_dcp(
                 checkpoint_path,
                 config=config,
                 parallelism_config=parallelism_config,
                 compile_config=compile_config,
             ).model
+            _log_mine(
+                "omni_inference_create",
+                "from_pretrained_dcp_end",
+                elapsed_s=f"{time.perf_counter() - model_start:.3f}",
+            )
             if model.config.rectified_flow_inference_config.scheduler_type != sampler_override:
+                scheduler_start = time.perf_counter()
+                _log_mine(
+                    "omni_inference_create",
+                    "scheduler_override_start",
+                    sampler_override=sampler_override,
+                )
                 model.config.rectified_flow_inference_config.scheduler_type = sampler_override
                 model.set_up_scheduler_and_sampler()
+                _log_mine(
+                    "omni_inference_create",
+                    "scheduler_override_end",
+                    elapsed_s=f"{time.perf_counter() - scheduler_start:.3f}",
+                )
                 log.debug(f"Sampler overridden to: {sampler_override}")
 
         vae_decode_stream: torch.cuda.Stream | None = None
         if setup_args.use_separate_pipeline_vision_decode_gpu:
+            vae_move_start = time.perf_counter()
+            _log_mine("omni_inference_create", "separate_vae_setup_start")
             # The CP/CFGP ranks are partitioned into replica-local groups of size
             # cp_size * cfgp_size. Only the first rank in each group owns separate-VAE
             # decode work. For example, with cp_size=2 and cfgp_size=1, ranks [0,1]
@@ -1146,7 +1286,13 @@ class OmniInference(Inference):
                     f"Configured vision VAE on device '{vae_device}' while inference remains on '{inference_device}'",
                     rank0_only=False,
                 )
+            _log_mine(
+                "omni_inference_create",
+                "separate_vae_setup_end",
+                elapsed_s=f"{time.perf_counter() - vae_move_start:.3f}",
+            )
 
+        _log_mine("omni_inference_create", "end", elapsed_s=f"{time.perf_counter() - total_start:.3f}")
         return cls(setup_args=setup_args, model=model, vae_decode_stream=vae_decode_stream, **kwargs)
 
     @classmethod
@@ -1206,17 +1352,38 @@ class OmniInference(Inference):
     def create_batches(
         self, sample_args_list: Sequence[SampleArgs]
     ) -> Generator[tuple[list[SampleArgs], dict[str, Any]]]:
+        total_start = time.perf_counter()
         assert isinstance(self.setup_args, OmniSetupArgs)
         max_model_len = self.setup_args.max_model_len
         max_num_seqs = self.setup_args.max_num_seqs
+        _log_mine(
+            "create_batches",
+            "start",
+            input_sample_count=len(sample_args_list),
+            replica_id=self.replica_id,
+            num_replicas=self.num_replicas,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+        )
 
+        finalize_start = time.perf_counter()
         sample_args_list = _finalize_sample_args_list(cast(Sequence[OmniSampleArgs], sample_args_list))
+        _log_mine(
+            "create_batches",
+            "finalize_sample_args_end",
+            finalized_sample_count=len(sample_args_list),
+            elapsed_s=f"{time.perf_counter() - finalize_start:.3f}",
+        )
         dataset = SampleDataset(sample_args_list, self.model)
+        _log_mine("create_batches", "dataset_created", dataset_len=len(dataset))
 
         # Mod-shard the dataset indices across replicas.
         sampler_indices = list(range(self.replica_id, len(dataset), self.num_replicas))
+        _log_mine("create_batches", "sampler_indices_created", sampler_count=len(sampler_indices))
 
         # --- Phase 1: pre-compute batch boundaries (cheap, no data prep) ---
+        boundaries_start = time.perf_counter()
+        _log_mine("create_batches", "batch_boundaries_start")
         batch_position_lists = list(
             _iter_packed_batches(
                 items=range(len(sampler_indices)),
@@ -1228,6 +1395,13 @@ class OmniInference(Inference):
         )
 
         num_local_batches = len(batch_position_lists)
+        _log_mine(
+            "create_batches",
+            "batch_boundaries_end",
+            num_local_batches=num_local_batches,
+            batch_sizes=[len(batch_positions) for batch_positions in batch_position_lists],
+            elapsed_s=f"{time.perf_counter() - boundaries_start:.3f}",
+        )
 
         log.debug(f"Number of local batches: {num_local_batches}", rank0_only=False)
 
@@ -1236,11 +1410,20 @@ class OmniInference(Inference):
         # the same local batch count, so a global MAX all-reduce is sufficient
         # to align all replicas.
         if torch.distributed.is_initialized() and self.num_replicas > 1:
+            reduce_start = time.perf_counter()
+            _log_mine("create_batches", "batch_count_all_reduce_start", num_local_batches=num_local_batches)
             count_tensor = torch.tensor([num_local_batches], dtype=torch.long, device="cuda")
             torch.distributed.all_reduce(count_tensor, op=torch.distributed.ReduceOp.MAX)
             global_max_batches = int(count_tensor.item())
+            _log_mine(
+                "create_batches",
+                "batch_count_all_reduce_end",
+                global_max_batches=global_max_batches,
+                elapsed_s=f"{time.perf_counter() - reduce_start:.3f}",
+            )
         else:
             global_max_batches = num_local_batches
+            _log_mine("create_batches", "batch_count_no_all_reduce", global_max_batches=global_max_batches)
 
         log.debug(f"Number of global batches: {global_max_batches}")
         log.debug(f"Number of padding batches: {global_max_batches - num_local_batches}", rank0_only=False)
@@ -1249,26 +1432,68 @@ class OmniInference(Inference):
         batches_yielded = 0
 
         for batch_positions in batch_position_lists:
+            batch_start = time.perf_counter()
+            _log_mine(
+                "create_batches",
+                "real_batch_start",
+                batch_index=batches_yielded,
+                batch_positions=batch_positions,
+            )
             chunk_args: list[SampleArgs] = []
             chunk_data: list[dict[str, Any]] = []
 
             for pos in batch_positions:
                 sample_idx = sampler_indices[pos]
+                item_start = time.perf_counter()
+                _log_mine("create_batches", "dataset_getitem_start", sample_idx=sample_idx, pos=pos)
                 sample_args, data_batch = dataset[sample_idx]
+                _log_mine(
+                    "create_batches",
+                    "dataset_getitem_end",
+                    sample_idx=sample_idx,
+                    sample_name=sample_args.name,
+                    keys=sorted(data_batch.keys()),
+                    elapsed_s=f"{time.perf_counter() - item_start:.3f}",
+                )
 
                 if self.setup_args.debug and self.should_process_sample(sample_args):
                     assert sample_args.output_dir is not None
                     sample_args.output_dir.mkdir(parents=True, exist_ok=True)
+                    save_debug_start = time.perf_counter()
+                    _log_mine("create_batches", "debug_save_data_start", sample_name=sample_args.name)
                     self.save_data(
                         data_batch,
                         output_dir=sample_args.output_dir,
                         output_name="sample_data",
                     )
+                    _log_mine(
+                        "create_batches",
+                        "debug_save_data_end",
+                        sample_name=sample_args.name,
+                        elapsed_s=f"{time.perf_counter() - save_debug_start:.3f}",
+                    )
 
                 chunk_args.append(sample_args)
                 chunk_data.append(data_batch)
 
-            yield chunk_args, _merge_data_batches(chunk_data)
+            merge_start = time.perf_counter()
+            _log_mine(
+                "create_batches",
+                "merge_data_batches_start",
+                batch_index=batches_yielded,
+                chunk_count=len(chunk_data),
+            )
+            merged_data = _merge_data_batches(chunk_data)
+            _log_mine(
+                "create_batches",
+                "real_batch_end",
+                batch_index=batches_yielded,
+                sample_names=[cast(OmniSampleArgs, sa).name for sa in chunk_args],
+                keys=sorted(merged_data.keys()),
+                merge_elapsed_s=f"{time.perf_counter() - merge_start:.3f}",
+                elapsed_s=f"{time.perf_counter() - batch_start:.3f}",
+            )
+            yield chunk_args, merged_data
             batches_yielded += 1
 
         assert batches_yielded == num_local_batches
@@ -1286,32 +1511,75 @@ class OmniInference(Inference):
         dummy_sa = sample_args_list[0].model_copy(
             update={"output_dir": None, "name": "padding", "num_steps": 1, "guidance": 1.0}
         )
+        dummy_start = time.perf_counter()
+        _log_mine("create_batches", "dummy_data_start")
         dummy_data = dataset[0][1]
+        _log_mine(
+            "create_batches",
+            "dummy_data_end",
+            keys=sorted(dummy_data.keys()),
+            elapsed_s=f"{time.perf_counter() - dummy_start:.3f}",
+        )
         while batches_yielded < global_max_batches:
+            _log_mine("create_batches", "dummy_batch_yield", batch_index=batches_yielded)
             yield [dummy_sa], dummy_data
             batches_yielded += 1
         assert batches_yielded == global_max_batches
+        _log_mine(
+            "create_batches",
+            "end",
+            batches_yielded=batches_yielded,
+            elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+        )
 
     @torch.no_grad()
     @override
     def generate_batch(
         self, sample_args_list: Sequence[SampleArgs], data_batch: dict[str, Any], *, warmup: bool = False
     ) -> list[SampleOutputs]:
+        total_start = time.perf_counter()
         assert all(isinstance(sa, OmniSampleArgs) for sa in sample_args_list)
+        _log_mine(
+            "generate_batch",
+            "start",
+            warmup=warmup,
+            batch_size=len(sample_args_list),
+            sample_names=[cast(OmniSampleArgs, sa).name for sa in sample_args_list],
+            model_modes=[cast(OmniSampleArgs, sa).model_mode.value for sa in sample_args_list],
+            data_keys=sorted(data_batch.keys()),
+        )
 
         transfer_flags = [bool(sa.transfer_hints) for sa in sample_args_list]
         if any(transfer_flags):
             assert all(transfer_flags), "Cannot mix transfer and non-transfer samples in a batch"
             assert len(sample_args_list) == 1, "Batching is not supported for transfer inference"
-            return self._generate_transfer_batch(sample_args_list[0], warmup=warmup)
+            _log_mine("generate_batch", "transfer_batch_start")
+            result = self._generate_transfer_batch(sample_args_list[0], warmup=warmup)
+            _log_mine(
+                "generate_batch",
+                "transfer_batch_end",
+                output_count=len(result),
+                elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+            )
+            return result
 
         reasoner_flags = [cast(OmniSampleArgs, sa).model_mode.is_reasoner for sa in sample_args_list]
         if any(reasoner_flags):
             assert all(reasoner_flags), "Cannot mix reasoner and non-reasoner samples in a batch"
-            return self._generate_reasoner_batch(sample_args_list, data_batch, warmup=warmup)
+            _log_mine("generate_batch", "reasoner_batch_start")
+            result = self._generate_reasoner_batch(sample_args_list, data_batch, warmup=warmup)
+            _log_mine(
+                "generate_batch",
+                "reasoner_batch_end",
+                output_count=len(result),
+                elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+            )
+            return result
 
         # Process inputs
         try:
+            process_start = time.perf_counter()
+            _log_mine("generate_batch", "process_inputs_start")
             with sync_distributed_errors():
                 for sample_args in sample_args_list:
                     if self.should_process_sample(sample_args) and not warmup:
@@ -1319,14 +1587,41 @@ class OmniInference(Inference):
                         assert sample_args.output_dir is not None
                         sample_args.output_dir.mkdir(parents=True, exist_ok=True)
                         sample_args_file = sample_args.output_dir / "sample_args.json"
+                        sample_args_save_start = time.perf_counter()
+                        _log_mine(
+                            "generate_batch",
+                            "save_sample_args_start",
+                            sample_name=sample_args.name,
+                            path=str(sample_args_file),
+                        )
                         sample_args_file.write_text(sample_args.model_dump_json())
+                        _log_mine(
+                            "generate_batch",
+                            "save_sample_args_end",
+                            sample_name=sample_args.name,
+                            elapsed_s=f"{time.perf_counter() - sample_args_save_start:.3f}",
+                        )
                         log.info(f"Saved sample args to '{sample_args_file}'", rank0_only=False)
 
                 assert all(sa.num_outputs == 1 for sa in sample_args_list), "num_outputs must be 1"
+                finalize_data_start = time.perf_counter()
+                _log_mine("generate_batch", "finalize_data_batch_start", input_keys=sorted(data_batch.keys()))
                 data_batch = _finalize_data_batch(
                     data_batch=data_batch, batch_size=len(sample_args_list), model=self.model
                 )
+                _log_mine(
+                    "generate_batch",
+                    "finalize_data_batch_end",
+                    output_keys=sorted(data_batch.keys()),
+                    elapsed_s=f"{time.perf_counter() - finalize_data_start:.3f}",
+                )
+            _log_mine(
+                "generate_batch",
+                "process_inputs_end",
+                elapsed_s=f"{time.perf_counter() - process_start:.3f}",
+            )
         except Exception as e:
+            _log_mine("generate_batch", "process_inputs_exception", error=repr(e))
             return [
                 self._handle_sample_exception(args, e)
                 for args in sample_args_list
@@ -1411,10 +1706,18 @@ class OmniInference(Inference):
             # directly and dispatches per-task group, so mixed
             # opted-in / opted-out and mixed-task batches all flow
             # through without a caller-side collapse.
+            upsample_start = time.perf_counter()
+            _log_mine("generate_batch", "prompt_upsampling_tasks_start")
             resolved_upsample_tasks = _infer_native_prompt_upsampling_tasks(
                 data_batch,
                 omni_sample_args_list,
                 self.model,
+            )
+            _log_mine(
+                "generate_batch",
+                "prompt_upsampling_tasks_end",
+                resolved_upsample_tasks=resolved_upsample_tasks,
+                elapsed_s=f"{time.perf_counter() - upsample_start:.3f}",
             )
             distinct_upsample_tasks = set(resolved_upsample_tasks)
             if len(distinct_upsample_tasks) > 1:
@@ -1472,6 +1775,8 @@ class OmniInference(Inference):
                         "(one must divide the other). Non-nesting CP/CFGP overlays "
                         "with divergent per-sample num_steps are unsupported."
                     )
+                reduce_steps_start = time.perf_counter()
+                _log_mine("generate_batch", "num_steps_all_reduce_start", local_num_steps=local_num_steps)
                 _steps_t = torch.tensor(
                     [local_num_steps], device=self.model.tensor_kwargs["device"], dtype=torch.int32
                 )
@@ -1479,7 +1784,30 @@ class OmniInference(Inference):
                     _steps_t, op=torch.distributed.ReduceOp.MAX, group=parallel_dims.dp_shard_mesh.get_group()
                 )
                 align_num_steps = int(_steps_t.item())
+                _log_mine(
+                    "generate_batch",
+                    "num_steps_all_reduce_end",
+                    align_num_steps=align_num_steps,
+                    elapsed_s=f"{time.perf_counter() - reduce_steps_start:.3f}",
+                )
+            else:
+                _log_mine(
+                    "generate_batch",
+                    "num_steps_no_all_reduce",
+                    local_num_steps=local_num_steps,
+                    align_num_steps=align_num_steps,
+                )
 
+            generate_start = time.perf_counter()
+            _log_mine(
+                "generate_batch",
+                "generate_samples_start",
+                n_sample=n_sample,
+                local_num_steps=local_num_steps,
+                align_num_steps=align_num_steps,
+                guidance=guidance,
+                upsample_task=upsample_task,
+            )
             with self._get_timer(f"{self.model.__class__.__name__}.generate_samples_from_batch"):
                 outputs = self.model.generate_samples_from_batch(
                     data_batch,
@@ -1503,7 +1831,15 @@ class OmniInference(Inference):
                     upsample_presence_penalty=_getattr(omni_sample_args_list, "prompt_upsampler_presence_penalty"),
                     upsample_seed=_getattr(omni_sample_args_list, "prompt_upsampler_seed"),
                 )
+            _log_mine(
+                "generate_batch",
+                "generate_samples_end",
+                output_keys=sorted(outputs.keys()),
+                elapsed_s=f"{time.perf_counter() - generate_start:.3f}",
+            )
 
+            decode_start = time.perf_counter()
+            _log_mine("generate_batch", "decode_vision_start", output_keys=sorted(outputs.keys()))
             with self._get_timer(f"{self.model.__class__.__name__}.decode"):
                 output_vision = outputs.pop("vision")
                 decoded_vision = [decode_vision(vision) for vision in output_vision]
@@ -1511,23 +1847,46 @@ class OmniInference(Inference):
                 if self.vae_decode_stream is not None:
                     # If we are using a separate GPU for VAE decoding, wait for results to be ready
                     torch.cuda.current_stream(device=outputs["vision"][0].device).wait_stream(self.vae_decode_stream)
+            _log_mine(
+                "generate_batch",
+                "decode_vision_end",
+                vision_shapes=[tuple(vision.shape) for vision in outputs["vision"]],
+                elapsed_s=f"{time.perf_counter() - decode_start:.3f}",
+            )
         for k, v in outputs.items():
             if len(v) != len(sample_args_list):
                 raise ValueError(f"Output key '{k}' has length {len(v)} but expected {len(sample_args_list)}")
 
         if "sound" in outputs:
+            sound_start = time.perf_counter()
+            _log_mine("generate_batch", "decode_sound_start")
             with self._get_timer(f"{self.model.__class__.__name__}.decode_sound"):
                 outputs["sound"] = [self.model.decode_sound(sound) for sound in outputs.pop("sound")]
+            _log_mine(
+                "generate_batch",
+                "decode_sound_end",
+                elapsed_s=f"{time.perf_counter() - sound_start:.3f}",
+            )
 
         if warmup:
+            _log_mine("generate_batch", "warmup_end", elapsed_s=f"{time.perf_counter() - total_start:.3f}")
             return []
 
         # Save outputs
         sample_outputs: list[SampleOutputs] = []
         try:
+            save_outputs_start = time.perf_counter()
+            _log_mine("generate_batch", "save_outputs_start", output_keys=sorted(outputs.keys()))
             with sync_distributed_errors():
                 for sample_idx, sample_args in enumerate(sample_args_list):
                     if self.should_process_sample(sample_args):
+                        sample_save_start = time.perf_counter()
+                        _log_mine(
+                            "generate_batch",
+                            "save_sample_start",
+                            sample_idx=sample_idx,
+                            sample_name=cast(OmniSampleArgs, sample_args).name,
+                        )
                         assert isinstance(sample_args, OmniSampleArgs)
                         assert sample_args.output_dir is not None
                         assert sample_args.num_outputs == 1
@@ -1535,10 +1894,18 @@ class OmniInference(Inference):
                         vision_cthw = output.pop("vision")
 
                         # Run guardrails
+                        guardrail_start = time.perf_counter()
+                        _log_mine("generate_batch", "guardrails_start", sample_name=sample_args.name)
                         self._run_text_guardrail(
                             str(sample_args.output_dir), data_batch[self.model.input_caption_key][sample_idx]
                         )
                         vision_cthw = self._run_video_guardrail(str(sample_args.output_dir), vision_cthw)
+                        _log_mine(
+                            "generate_batch",
+                            "guardrails_end",
+                            sample_name=sample_args.name,
+                            elapsed_s=f"{time.perf_counter() - guardrail_start:.3f}",
+                        )
                         output["vision"] = vision_cthw
 
                         content: dict[str, Any] = {}
@@ -1557,8 +1924,25 @@ class OmniInference(Inference):
                             quality = sample_args.video_save_quality
                         vision_file = sample_args.output_dir / f"vision{sample_args.vision_extension}"
                         output_fps = sample_args.fps
+                        save_vision_start = time.perf_counter()
+                        _log_mine(
+                            "generate_batch",
+                            "save_img_or_video_start",
+                            sample_name=sample_args.name,
+                            path=str(vision_file),
+                            vision_shape=tuple(vision_cthw.shape),
+                            fps=output_fps,
+                            quality=quality,
+                        )
                         save_img_or_video(
                             vision_cthw, str(vision_file.with_suffix("")), fps=output_fps, quality=quality
+                        )
+                        _log_mine(
+                            "generate_batch",
+                            "save_img_or_video_end",
+                            sample_name=sample_args.name,
+                            path=str(vision_file),
+                            elapsed_s=f"{time.perf_counter() - save_vision_start:.3f}",
                         )
                         assert vision_file.is_file(), vision_file
                         files.append(vision_file)
@@ -1570,9 +1954,24 @@ class OmniInference(Inference):
                             )
 
                             audio_info = get_audio_tokenizer_info(self.model)
+                            mux_start = time.perf_counter()
+                            _log_mine("generate_batch", "mux_audio_start", sample_name=sample_args.name)
                             mux_audio_into_video(vision_file, output["sound"], audio_info.sample_rate)
+                            _log_mine(
+                                "generate_batch",
+                                "mux_audio_end",
+                                sample_name=sample_args.name,
+                                elapsed_s=f"{time.perf_counter() - mux_start:.3f}",
+                            )
 
                         if "action" in output:
+                            action_extract_start = time.perf_counter()
+                            _log_mine(
+                                "generate_batch",
+                                "extract_action_start",
+                                sample_name=sample_args.name,
+                                action_shape=tuple(output["action"].shape),
+                            )
                             pred_action = output["action"]
                             if "raw_action_dim" in data_batch:
                                 raw_action_dim = int(data_batch["raw_action_dim"][sample_idx].item())
@@ -1581,24 +1980,63 @@ class OmniInference(Inference):
                                 )
                                 pred_action = pred_action[..., :raw_action_dim]
                             content["action"] = pred_action.detach().cpu().tolist()
+                            _log_mine(
+                                "generate_batch",
+                                "extract_action_end",
+                                sample_name=sample_args.name,
+                                elapsed_s=f"{time.perf_counter() - action_extract_start:.3f}",
+                            )
 
                         sample_output = SampleOutputs(
                             args=sample_args.model_dump(mode="json"),
                             outputs=[SampleOutput(content=content, files=files)],
                         )
                         sample_outputs_file = sample_args.output_dir / "sample_outputs.json"
+                        output_json_start = time.perf_counter()
+                        _log_mine(
+                            "generate_batch",
+                            "write_sample_outputs_start",
+                            sample_name=sample_args.name,
+                            path=str(sample_outputs_file),
+                        )
                         sample_outputs_file.write_text(sample_output.model_dump_json())
+                        _log_mine(
+                            "generate_batch",
+                            "write_sample_outputs_end",
+                            sample_name=sample_args.name,
+                            elapsed_s=f"{time.perf_counter() - output_json_start:.3f}",
+                        )
                         log.success(f"Saved sample outputs to '{sample_outputs_file}'", rank0_only=False)
 
                         sample_outputs.append(sample_output)
+                        _log_mine(
+                            "generate_batch",
+                            "save_sample_end",
+                            sample_name=sample_args.name,
+                            elapsed_s=f"{time.perf_counter() - sample_save_start:.3f}",
+                        )
+
+            _log_mine(
+                "generate_batch",
+                "save_outputs_end",
+                output_count=len(sample_outputs),
+                elapsed_s=f"{time.perf_counter() - save_outputs_start:.3f}",
+            )
 
         except Exception as e:
+            _log_mine("generate_batch", "save_outputs_exception", error=repr(e))
             return [
                 self._handle_sample_exception(sample_args, e)
                 for sample_args in sample_args_list
                 if self.should_process_sample(sample_args)
             ]
 
+        _log_mine(
+            "generate_batch",
+            "end",
+            output_count=len(sample_outputs),
+            elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+        )
         return sample_outputs
 
     @torch.no_grad()

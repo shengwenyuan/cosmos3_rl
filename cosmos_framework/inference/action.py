@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,16 @@ from cosmos_framework.data.vfm.action.transforms import (
 )
 from cosmos_framework.inference.args import ModelMode
 from cosmos_framework.inference.vision import read_media_frames
+from cosmos_framework.utils import log
 from cosmos_framework.utils.vfm.data_utils import get_vision_data_resolution
+
+_MINE_MARKER = "MINE_div"
+
+
+def _log_mine(stage: str, event: str, **fields: Any) -> None:
+    field_text = " ".join(f"{key}={value!r}" for key, value in fields.items())
+    suffix = f" {field_text}" if field_text else ""
+    log.info(f"{_MINE_MARKER} stage={stage} event={event}{suffix}", rank0_only=False)
 
 
 def _load_actions(
@@ -34,19 +44,56 @@ def _load_actions(
     raw_action_dim: int | None,
 ) -> torch.Tensor:
     """Load actions from JSON (or zeros for policy mode and inverse dynamics mode). Returns padded action tensor."""
+    total_start = time.perf_counter()
+    _log_mine(
+        "action_load",
+        "start",
+        action_path=str(action_path) if action_path is not None else None,
+        model_mode=model_mode.value,
+        action_chunk_size=action_chunk_size,
+        max_action_dim=max_action_dim,
+        raw_action_dim=raw_action_dim,
+    )
     match model_mode:
         case ModelMode.FORWARD_DYNAMICS:
             assert action_path is not None, "action_path is required for forward_dynamics mode"
             p = Path(str(action_path))
-            raw = torch.tensor(json.loads(p.read_text()), dtype=torch.float32)
+            read_start = time.perf_counter()
+            _log_mine("action_load", "json_read_start", action_path=str(p))
+            raw_json = p.read_text()
+            raw = torch.tensor(json.loads(raw_json), dtype=torch.float32)
+            _log_mine(
+                "action_load",
+                "json_read_end",
+                action_path=str(p),
+                raw_shape=tuple(raw.shape),
+                bytes=len(raw_json),
+                elapsed_s=f"{time.perf_counter() - read_start:.3f}",
+            )
             raw_dim = raw.shape[-1]
             assert raw_dim == raw_action_dim, (
                 f"Raw action dimension from file ({raw_dim}) does not match expected dimension ({raw_action_dim})"
             )
-            return pad_action_to_max_dim(raw, max_action_dim)
+            pad_start = time.perf_counter()
+            padded = pad_action_to_max_dim(raw, max_action_dim)
+            _log_mine(
+                "action_load",
+                "end",
+                output_shape=tuple(padded.shape),
+                pad_elapsed_s=f"{time.perf_counter() - pad_start:.3f}",
+                elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+            )
+            return padded
         case ModelMode.POLICY | ModelMode.INVERSE_DYNAMICS:
             assert raw_action_dim is not None, "raw_action_dim is required for policy and inverse_dynamics modes"
-            return torch.zeros(action_chunk_size, max_action_dim, dtype=torch.float32)
+            action = torch.zeros(action_chunk_size, max_action_dim, dtype=torch.float32)
+            _log_mine(
+                "action_load",
+                "zeros_end",
+                output_shape=tuple(action.shape),
+                elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+            )
+            return action
         case _:
             raise ValueError(f"Unsupported action model_mode: {model_mode}")
 
@@ -92,31 +139,74 @@ def build_action_batch(
     device: Any = "cuda",
 ) -> dict:
     """Build an Action data batch from pre-loaded video and action tensors."""
+    total_start = time.perf_counter()
     target_frames = action_chunk_size + 1
     _, num_frames, h, w = video.shape
+    _log_mine(
+        "action_batch",
+        "start",
+        model_mode=model_mode.value,
+        domain_name=domain_name,
+        input_video_key=input_video_key,
+        video_shape=tuple(video.shape),
+        action_shape=tuple(action.shape),
+        raw_action_dim=raw_action_dim,
+        action_chunk_size=action_chunk_size,
+        fps=fps,
+        resolution=resolution,
+        batch_size=batch_size,
+    )
 
+    temporal_start = time.perf_counter()
     if num_frames < target_frames:
         pad = video[:, -1:].repeat(1, target_frames - num_frames, 1, 1)
         video = torch.cat([video, pad], dim=1)
     elif num_frames > target_frames:
         video = video[:, :target_frames]
+    _log_mine(
+        "action_batch",
+        "temporal_fit_end",
+        target_frames=target_frames,
+        output_shape=tuple(video.shape),
+        elapsed_s=f"{time.perf_counter() - temporal_start:.3f}",
+    )
 
     if resolution is None:
         resolution = get_vision_data_resolution((h, w))
 
     target_w, target_h = find_closest_target_size(h, w, resolution)
     pad_dict: dict[str, Any] = {"video": video}
+    pad_start = time.perf_counter()
+    _log_mine(
+        "action_batch",
+        "reflection_pad_start",
+        target_h=target_h,
+        target_w=target_w,
+        input_shape=tuple(video.shape),
+    )
     reflection_pad_to_target(pad_dict, ["video"], keep_aspect_ratio=True, target_w=target_w, target_h=target_h)
     video_padded = pad_dict["video"]
     padded_image_size = pad_dict["image_size"]
+    _log_mine(
+        "action_batch",
+        "reflection_pad_end",
+        output_shape=tuple(video_padded.shape),
+        image_size=tuple(padded_image_size.shape),
+        elapsed_s=f"{time.perf_counter() - pad_start:.3f}",
+    )
 
+    plan_start = time.perf_counter()
+    _log_mine("action_batch", "sequence_plan_start", mode=model_mode.value)
     sequence_plan = build_sequence_plan_from_mode(
         mode=model_mode.value,
         video_length=target_frames,
         action_length=action_chunk_size,
         has_text=True,
     )
+    _log_mine("action_batch", "sequence_plan_end", elapsed_s=f"{time.perf_counter() - plan_start:.3f}")
 
+    prompt_start = time.perf_counter()
+    _log_mine("action_batch", "format_prompt_start", prompt_chars=len(prompt), view_point=view_point)
     ai_caption = _format_prompt(
         prompt=prompt,
         view_point=view_point,
@@ -125,13 +215,19 @@ def build_action_batch(
         fps=torch.tensor(fps, dtype=torch.long),
         image_size=padded_image_size,
     )
+    _log_mine(
+        "action_batch",
+        "format_prompt_end",
+        ai_caption_chars=len(ai_caption),
+        elapsed_s=f"{time.perf_counter() - prompt_start:.3f}",
+    )
 
     action_processing_record = ActionProcessingRecord(
         raw_action_dim=raw_action_dim,
         action_normalizer=None,
     )
 
-    return {
+    batch = {
         input_video_key: [[video_padded]] * batch_size,
         "action": [[action]] * batch_size,
         **make_batched_action_processing_fields(action_processing_record, batch_size),
@@ -143,6 +239,15 @@ def build_action_batch(
         "domain_id": [torch.tensor(get_domain_id(domain_name), dtype=torch.long)] * batch_size,
         "sequence_plan": [sequence_plan] * batch_size,
     }
+    _log_mine(
+        "action_batch",
+        "end",
+        keys=sorted(batch.keys()),
+        video_shape=tuple(video_padded.shape),
+        action_shape=tuple(action.shape),
+        elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+    )
+    return batch
 
 
 def get_action_sample_data(
@@ -162,20 +267,49 @@ def get_action_sample_data(
     device: Any,
 ) -> dict:
     """Load observation image/video + optional actions and build an Action inference batch."""
+    total_start = time.perf_counter()
     domain_name = domain_name.lower().strip()
+    _log_mine(
+        "action_sample_data",
+        "start",
+        vision_path=str(vision_path),
+        action_path=str(action_path) if action_path is not None else None,
+        model_mode=model_mode.value,
+        domain_name=domain_name,
+        resolution=resolution,
+        action_chunk_size=action_chunk_size,
+        batch_size=batch_size,
+    )
     if domain_name not in EMBODIMENT_TO_RAW_ACTION_DIM:
         raise ValueError(
             f"invalid domain_name {domain_name!r}; expected one of {sorted(EMBODIMENT_TO_RAW_ACTION_DIM.keys())}"
         )
 
     raw_action_dim = EMBODIMENT_TO_RAW_ACTION_DIM[domain_name]
+    read_start = time.perf_counter()
+    _log_mine("action_sample_data", "read_media_frames_start", vision_path=str(vision_path))
     frames, _ = read_media_frames(Path(vision_path), max_frames=action_chunk_size + 1)
+    _log_mine(
+        "action_sample_data",
+        "read_media_frames_end",
+        vision_path=str(vision_path),
+        frames_shape=tuple(frames.shape),
+        elapsed_s=f"{time.perf_counter() - read_start:.3f}",
+    )
     assert action_path is not None or raw_action_dim is not None, (
         "Either action_path or raw_action_dim must be provided"
     )
+    action_start = time.perf_counter()
     action = _load_actions(action_path, model_mode, action_chunk_size, max_action_dim, raw_action_dim)
+    _log_mine(
+        "action_sample_data",
+        "load_actions_end",
+        action_shape=tuple(action.shape),
+        elapsed_s=f"{time.perf_counter() - action_start:.3f}",
+    )
 
-    return build_action_batch(
+    batch_start = time.perf_counter()
+    batch = build_action_batch(
         video=frames,
         action=action,
         raw_action_dim=raw_action_dim,
@@ -190,3 +324,11 @@ def get_action_sample_data(
         batch_size=batch_size,
         device=device,
     )
+    _log_mine(
+        "action_sample_data",
+        "end",
+        keys=sorted(batch.keys()),
+        build_batch_elapsed_s=f"{time.perf_counter() - batch_start:.3f}",
+        elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+    )
+    return batch

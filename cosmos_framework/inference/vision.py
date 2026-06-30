@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 import math
+import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -13,6 +14,15 @@ from PIL import Image
 
 from cosmos_framework.data.vfm.sequence_packing import SequencePlan
 from cosmos_framework.data.vfm.utils import VIDEO_RES_SIZE_INFO
+from cosmos_framework.utils import log
+
+_MINE_MARKER = "MINE_div"
+
+
+def _log_mine(stage: str, event: str, **fields: Any) -> None:
+    field_text = " ".join(f"{key}={value!r}" for key, value in fields.items())
+    suffix = f" {field_text}" if field_text else ""
+    log.info(f"{_MINE_MARKER} stage={stage} event={event}{suffix}", rank0_only=False)
 
 
 def resize_pil_image(image: Image.Image, max_size: int, padding_constant: int) -> Image.Image:
@@ -88,12 +98,57 @@ def load_conditioning_video(
 
     ``keep`` selects which ``max_frames`` to take when the input is longer.
     """
-    frames, _, _ = torchvision.io.read_video(str(video_path), pts_unit="sec")
+    total_start = time.perf_counter()
+    read_start = time.perf_counter()
+    _log_mine(
+        "read_video",
+        "load_conditioning_video_read_start",
+        path=str(video_path),
+        max_frames=max_frames,
+        keep=keep,
+        target_h=target_h,
+        target_w=target_w,
+    )
+    frames, _, info = torchvision.io.read_video(str(video_path), pts_unit="sec")
+    _log_mine(
+        "read_video",
+        "load_conditioning_video_read_end",
+        path=str(video_path),
+        raw_shape=tuple(frames.shape),
+        info=info,
+        elapsed_s=f"{time.perf_counter() - read_start:.3f}",
+    )
+
+    slice_start = time.perf_counter()
     frames = frames[-max_frames:] if keep == "last" else frames[:max_frames]  # [T,H,W,3]
+    _log_mine(
+        "read_video",
+        "load_conditioning_video_slice_end",
+        path=str(video_path),
+        sliced_shape=tuple(frames.shape),
+        elapsed_s=f"{time.perf_counter() - slice_start:.3f}",
+    )
+
+    resize_start = time.perf_counter()
     frames_tchw = frames.permute(0, 3, 1, 2).float()  # [T,3,H,W]
     frames_resized = _resize_and_center_crop(frames_tchw, target_h, target_w)  # [T,3,target_h,target_w]
+    _log_mine(
+        "read_video",
+        "load_conditioning_video_resize_end",
+        path=str(video_path),
+        resized_shape=tuple(frames_resized.shape),
+        elapsed_s=f"{time.perf_counter() - resize_start:.3f}",
+    )
     frames_normalized = frames_resized / 127.5 - 1.0  # [T,3,target_h,target_w]
-    return frames_normalized.permute(1, 0, 2, 3)  # [3,T,target_h,target_w]
+    output = frames_normalized.permute(1, 0, 2, 3)  # [3,T,target_h,target_w]
+    _log_mine(
+        "read_video",
+        "load_conditioning_video_end",
+        path=str(video_path),
+        output_shape=tuple(output.shape),
+        elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+    )
+    return output
 
 
 def pil_to_conditioning_frames(pil_img: Image.Image) -> tuple[torch.Tensor, int, int]:
@@ -179,15 +234,43 @@ def read_media_frames(path: Path, max_frames: int) -> tuple[torch.Tensor, float]
     """Read an image or video into a uint8 tensor of shape (C, T, H, W)."""
     ext = path.suffix.lower()
     if ext in _IMAGE_EXTENSIONS:
+        read_start = time.perf_counter()
+        _log_mine("read_media_frames", "image_open_start", path=str(path), max_frames=max_frames)
         with path.open("rb") as f:
             image = Image.open(f).convert("RGB")
         frames = torch.from_numpy(np.array(image)).permute(2, 0, 1).unsqueeze(1)
+        _log_mine(
+            "read_media_frames",
+            "image_open_end",
+            path=str(path),
+            output_shape=tuple(frames.shape),
+            elapsed_s=f"{time.perf_counter() - read_start:.3f}",
+        )
         return frames, 1.0
     if ext not in _VIDEO_EXTENSIONS:
         raise ValueError(f"Unsupported media extension: {ext}")
+    read_start = time.perf_counter()
+    _log_mine("read_media_frames", "video_read_start", path=str(path), max_frames=max_frames)
     frames, _, info = torchvision.io.read_video(str(path), pts_unit="sec")
+    _log_mine(
+        "read_media_frames",
+        "video_read_end",
+        path=str(path),
+        raw_shape=tuple(frames.shape),
+        info=info,
+        elapsed_s=f"{time.perf_counter() - read_start:.3f}",
+    )
+    format_start = time.perf_counter()
     frames = frames[:max_frames].permute(0, 3, 1, 2).permute(1, 0, 2, 3)
     fps = float(info.get("video_fps", 24.0))
+    _log_mine(
+        "read_media_frames",
+        "video_format_end",
+        path=str(path),
+        output_shape=tuple(frames.shape),
+        fps=fps,
+        elapsed_s=f"{time.perf_counter() - format_start:.3f}",
+    )
     return frames, fps
 
 
@@ -199,13 +282,44 @@ def read_and_resize_media(
     max_frames: int,
 ) -> tuple[torch.Tensor, float, str, tuple[int, int]]:
     """Read an image/video and resize it to the requested resolution bucket."""
+    total_start = time.perf_counter()
+    _log_mine(
+        "read_and_resize_media",
+        "start",
+        path=str(path),
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+        max_frames=max_frames,
+    )
     raw_frames, fps = read_media_frames(path, max_frames=max_frames)
     original_hw = (raw_frames.shape[2], raw_frames.shape[3])
     detected_aspect_ratio = detect_aspect_ratio(raw_frames.shape[3], raw_frames.shape[2])
     final_aspect_ratio = aspect_ratio or detected_aspect_ratio
     width, height = VIDEO_RES_SIZE_INFO[resolution][final_aspect_ratio]
+    resize_start = time.perf_counter()
+    _log_mine(
+        "read_and_resize_media",
+        "resize_start",
+        path=str(path),
+        raw_shape=tuple(raw_frames.shape),
+        target_h=height,
+        target_w=width,
+        detected_aspect_ratio=detected_aspect_ratio,
+        final_aspect_ratio=final_aspect_ratio,
+    )
     resized = _resize_and_center_crop(raw_frames.permute(1, 0, 2, 3), height, width)
-    return resized.permute(1, 0, 2, 3), fps, final_aspect_ratio, original_hw
+    output = resized.permute(1, 0, 2, 3)
+    _log_mine(
+        "read_and_resize_media",
+        "end",
+        path=str(path),
+        output_shape=tuple(output.shape),
+        fps=fps,
+        original_hw=original_hw,
+        resize_elapsed_s=f"{time.perf_counter() - resize_start:.3f}",
+        elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+    )
+    return output, fps, final_aspect_ratio, original_hw
 
 
 def uint8_to_normalized_float(tensor: torch.Tensor, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:

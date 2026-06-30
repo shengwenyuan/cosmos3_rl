@@ -4,6 +4,7 @@
 import contextlib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ from cosmos_framework.inference.common.public_model_config import (
     model_config_uses_public_aliases,
     restore_model_config_from_public_model_config,
 )
-from cosmos_framework.utils import misc
+from cosmos_framework.utils import log, misc
 from cosmos_framework.utils.flags import SMOKE
 
 if TYPE_CHECKING:
@@ -136,6 +137,13 @@ _DIFFUSERS_NET_KEYS: frozenset[str] = frozenset(
         "sound_modality_embed",
     }
 )
+_MINE_MARKER = "MINE_div"
+
+
+def _log_mine(stage: str, event: str, **fields: Any) -> None:
+    field_text = " ".join(f"{key}={value!r}" for key, value in fields.items())
+    suffix = f" {field_text}" if field_text else ""
+    log.info(f"{_MINE_MARKER} stage={stage} event={event}{suffix}", rank0_only=False)
 
 
 def _should_drop_diffusers_weight_path(path: str) -> bool:
@@ -232,12 +240,21 @@ class _DiffusersHuggingFaceStorageReader(HuggingFaceStorageReader):
 
         state_dict_metadata: dict[str, STORAGE_TYPES] = {}
         storage_data: dict[MetadataIndex, _HFStorageInfo] = {}
+        metadata_start = time.perf_counter()
+        _log_mine(
+            "diffusers_metadata",
+            "start",
+            checkpoint_path=str(self.checkpoint_path),
+            shard_count=len(self.files_to_keys),
+        )
 
         for rel_path, diff_keys in sorted(self.files_to_keys.items()):
             shard_path = self.checkpoint_path / rel_path
             if not shard_path.exists():
                 raise FileNotFoundError(f"Diffusers checkpoint shard not found: {shard_path}")
 
+            shard_start = time.perf_counter()
+            _log_mine("diffusers_metadata", "shard_start", shard=str(rel_path), key_count=len(diff_keys))
             with safe_open(str(shard_path), framework="pt") as f:
                 shard_keys = set(f.keys())
                 missing_keys = sorted(set(diff_keys) - shard_keys)
@@ -284,6 +301,14 @@ class _DiffusersHuggingFaceStorageReader(HuggingFaceStorageReader):
                         dtype=dtype,
                     )
 
+            _log_mine(
+                "diffusers_metadata",
+                "shard_end",
+                shard=str(rel_path),
+                elapsed_s=f"{time.perf_counter() - shard_start:.3f}",
+            )
+
+        _log_mine("diffusers_metadata", "end", elapsed_s=f"{time.perf_counter() - metadata_start:.3f}")
         metadata = Metadata(
             state_dict_metadata=state_dict_metadata,
             storage_data=storage_data,
@@ -449,34 +474,133 @@ class Cosmos3OmniModel(transformers.PreTrainedModel):
         parallelism_config: ParallelismConfig | None = None,
         compile_config: CompileConfig | None = None,
     ):
+        total_start = time.perf_counter()
+        _log_mine(
+            "checkpoint_load",
+            "start",
+            checkpoint_path=str(checkpoint_path),
+            config_provided=config is not None,
+        )
         if config is None:
+            config_start = time.perf_counter()
+            _log_mine("checkpoint_load", "config_from_pretrained_start", checkpoint_path=str(checkpoint_path))
             config = Cosmos3OmniConfig.from_pretrained(checkpoint_path)
+            _log_mine(
+                "checkpoint_load",
+                "config_from_pretrained_end",
+                elapsed_s=f"{time.perf_counter() - config_start:.3f}",
+            )
         if parallelism_config is None:
             parallelism_config = ParallelismConfig()
         if compile_config is None:
             compile_config = CompileConfig()
         config.parallelism = attrs.asdict(parallelism_config)
         config.compile = attrs.asdict(compile_config)
+
+        instantiate_start = time.perf_counter()
+        _log_mine("checkpoint_load", "instantiate_model_start", checkpoint_path=str(checkpoint_path))
         model = cls(config)
+        _log_mine(
+            "checkpoint_load",
+            "instantiate_model_end",
+            elapsed_s=f"{time.perf_counter() - instantiate_start:.3f}",
+        )
+
+        detect_start = time.perf_counter()
+        _log_mine("checkpoint_load", "detect_type_start", checkpoint_path=str(checkpoint_path))
         checkpoint_type = CheckpointType.from_path(checkpoint_path)
+        _log_mine(
+            "checkpoint_load",
+            "detect_type_end",
+            checkpoint_type=checkpoint_type.value,
+            elapsed_s=f"{time.perf_counter() - detect_start:.3f}",
+        )
         match checkpoint_type:
             case CheckpointType.DCP:
+                state_start = time.perf_counter()
+                _log_mine("checkpoint_load", "state_dict_start", checkpoint_type=checkpoint_type.value)
                 state_dict = get_model_state_dict(model.model)
+                _log_mine(
+                    "checkpoint_load",
+                    "state_dict_end",
+                    checkpoint_type=checkpoint_type.value,
+                    key_count=len(state_dict),
+                    elapsed_s=f"{time.perf_counter() - state_start:.3f}",
+                )
                 storage_reader = FileSystemReader(str(checkpoint_path))
             case CheckpointType.HF:
-                if _is_diffusers_checkpoint(checkpoint_path):
+                is_diffusers = _is_diffusers_checkpoint(checkpoint_path)
+                _log_mine("checkpoint_load", "hf_layout_detected", is_diffusers=is_diffusers)
+                if is_diffusers:
+                    state_start = time.perf_counter()
+                    _log_mine(
+                        "checkpoint_load",
+                        "state_dict_start",
+                        checkpoint_type=checkpoint_type.value,
+                        target="net",
+                    )
                     state_dict = get_model_state_dict(model.model.net)
+                    _log_mine(
+                        "checkpoint_load",
+                        "state_dict_end",
+                        checkpoint_type=checkpoint_type.value,
+                        target="net",
+                        key_count=len(state_dict),
+                        elapsed_s=f"{time.perf_counter() - state_start:.3f}",
+                    )
+                    load_start = time.perf_counter()
+                    _log_mine(
+                        "checkpoint_load",
+                        "dcp_load_start",
+                        checkpoint_type=checkpoint_type.value,
+                        reader="diffusers_hf",
+                        key_count=len(state_dict),
+                    )
                     dcp.load(
                         state_dict=state_dict,
                         storage_reader=_DiffusersHuggingFaceStorageReader(checkpoint_path),
                         planner=_DiffusersLoadPlanner(checkpoint_path),
                     )
+                    _log_mine(
+                        "checkpoint_load",
+                        "dcp_load_end",
+                        checkpoint_type=checkpoint_type.value,
+                        reader="diffusers_hf",
+                        elapsed_s=f"{time.perf_counter() - load_start:.3f}",
+                        total_elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+                    )
                     return model
+                state_start = time.perf_counter()
+                _log_mine("checkpoint_load", "state_dict_start", checkpoint_type=checkpoint_type.value, target="model")
                 state_dict = get_model_state_dict(model)
+                _log_mine(
+                    "checkpoint_load",
+                    "state_dict_end",
+                    checkpoint_type=checkpoint_type.value,
+                    target="model",
+                    key_count=len(state_dict),
+                    elapsed_s=f"{time.perf_counter() - state_start:.3f}",
+                )
                 storage_reader = HuggingFaceStorageReader(str(checkpoint_path))
             case _:
                 assert_never(checkpoint_type)
+        load_start = time.perf_counter()
+        _log_mine(
+            "checkpoint_load",
+            "dcp_load_start",
+            checkpoint_type=checkpoint_type.value,
+            reader=type(storage_reader).__name__,
+            key_count=len(state_dict),
+        )
         dcp.load(state_dict=state_dict, storage_reader=storage_reader)
+        _log_mine(
+            "checkpoint_load",
+            "dcp_load_end",
+            checkpoint_type=checkpoint_type.value,
+            reader=type(storage_reader).__name__,
+            elapsed_s=f"{time.perf_counter() - load_start:.3f}",
+            total_elapsed_s=f"{time.perf_counter() - total_start:.3f}",
+        )
         return model
 
     @classmethod
