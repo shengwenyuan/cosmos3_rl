@@ -21,6 +21,11 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
     "embodiment_c_gripper": 15,
     "embodiment_c_gripper_ext": 15,
     "fractal": 20,
+    
+    # UR5e post-training — local additions. High ids (top of the 32-slot range; NVIDIA uses <=20)
+    # leave 21..29 as a buffer against future upstream embodiments.
+    "robomind-ur5-single": 30,  # single-arm UR5e, 7D joint_pos
+    "robomind-ur5-dual": 31,  # dual-arm UR5e, 14D joint_pos
 }
 
 
@@ -34,6 +39,8 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
     "robomind-franka": 10,
     "robomind-franka-dual": 20,
     "robomind-ur": 10,
+    # NOTE: robomind-ur5-single/-dual are intentionally ABSENT here. This dict is the ee_pose /
+    # midtrain (cartesian) raw width used only by offline FD/ID inference (inference/action.py)
     "embodiment_b": 30,
     "agibotworld": 29,
     "embodiment_c_gripper": 29,

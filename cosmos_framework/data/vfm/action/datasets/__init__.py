@@ -14,10 +14,14 @@ from cosmos_framework.data.vfm.action.datasets.bridge_orig_lerobot_dataset impor
 from cosmos_framework.data.vfm.action.datasets.droid_lerobot_dataset import DROIDLeRobotDataset
 from cosmos_framework.data.vfm.action.datasets.robomind_franka_dataset import RoboMINDFrankaDataset
 
+# UR5e post-training — local addition, not part of upstream Cosmos3.
+from cosmos_framework.data.vfm.action.datasets.robomind_ur5_dataset import RoboMINDUR5Dataset
+
 __all__ = [
     "ActionBaseDataset",
     "AgiBotWorldBetaLeRobotDataset",
     "BridgeOrigLeRobotDataset",
     "DROIDLeRobotDataset",
     "RoboMINDFrankaDataset",
+    "RoboMINDUR5Dataset",
 ]
