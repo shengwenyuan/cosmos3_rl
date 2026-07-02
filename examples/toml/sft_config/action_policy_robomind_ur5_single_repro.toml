@@ -1,0 +1,54 @@
+# UR5e post-training — local addition, not part of upstream Cosmos3.
+
+# ============================================================================
+# RoboMIND UR5(e) SINGLE-ARM action-policy SFT — run config for the
+# `action_policy_robomind_ur5_single_nano` experiment (7-D joint_pos, RoboLab-bound).
+# Recipe knobs (optimizer/lr, scheduler, count-based batch, action-head skip-load,
+# dataset knobs) live in the registered experiment; this file sets run-level scalars.
+#
+# Env required:
+#   UR5_SINGLE_ROOT=/path/to/robomind_ur5_single_lerobot/success  # RoboMIND 1.2 h5_ur_1rgb -> LeRobot v3
+#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>                   # convert_model_to_dcp; see docs
+#   WAN_VAE_PATH=<Wan2.2_VAE.pth>
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root                  # persist checkpoints
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_robomind_ur5_single_nano"
+project      = "cosmos3_action"
+group        = "action_sft"
+name         = "action_policy_robomind_ur5_single_repro"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # 8-GPU model shard; set replicate for multi-node HSDP
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[scheduler]
+cycle_lengths = [10000]   # match max_iter
+
+[trainer]
+max_iter     = 10000
+logging_iter = 50
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1000
+
+# NOTE: the experiment's lr=2e-4 is tuned for the ~8192 global batch of the full multi-node shape
+# (max_samples_per_batch=128 x 64 ranks). This single-node TOML (shard 8 / replicate 1) gives a
+# ~1024 global batch, so 2e-4 is ~8x large for it — treat single-node as a smoke config, or scale
+# lr down (roughly linearly) for a real 8-GPU run. Raise replicate degree for multi-node HSDP.
+# On lower-memory GPUs, reduce the per-rank batch at launch, e.g.:
+#   --opts dataloader_train.max_samples_per_batch=32
