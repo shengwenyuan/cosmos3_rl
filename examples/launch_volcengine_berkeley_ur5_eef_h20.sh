@@ -18,6 +18,7 @@ REPO_ROOT="${REPO_ROOT:-/root/code/cosmos-framework}"
 FAST_ROOT="${FAST_ROOT:-/mlp_vepfs/share/swy/cosmos3-framework}"
 SLOW_ROOT="${SLOW_ROOT:-/dexmal-datainfra-swy}"
 BOOTSTRAP_DIR="${BOOTSTRAP_DIR:-$SLOW_ROOT/bootstrap}"
+VOLC_BOOTSTRAP_FILE="${VOLC_BOOTSTRAP_FILE:-$REPO_ROOT/examples/volc_bootstrap_cosmos3_train.sh}"
 
 DATASET_PATH="${DATASET_PATH:-$FAST_ROOT/lerobot/berkeley_autolab_ur5}"
 BERKELEY_UR5_ROOT="${BERKELEY_UR5_ROOT:-$DATASET_PATH}"
@@ -86,21 +87,37 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
-source_env() {
-  if [[ -r "$HOME/.bashrc" ]]; then
-    # shellcheck disable=SC1090
-    source "$HOME/.bashrc"
+source_env_file() {
+  local env_file="$1"
+  local had_nounset=0
+
+  case "$-" in
+    *u*)
+      had_nounset=1
+      set +u
+      ;;
+  esac
+
+  # shellcheck disable=SC1090
+  source "$env_file"
+
+  if (( had_nounset )); then
+    set -u
   fi
+}
+
+source_env() {
+  [[ -r "$VOLC_BOOTSTRAP_FILE" ]] || die "VOLC_BOOTSTRAP_FILE is not readable: $VOLC_BOOTSTRAP_FILE"
+  source_env_file "$VOLC_BOOTSTRAP_FILE"
 
   # dev-machine-bootstrap.sh is not source-safe; it installs packages and edits
-  # ~/.bashrc. Source only explicitly provided env files.
+  # ~/.bashrc. Source only explicitly provided env files after the stable
+  # VolcEngine bootstrap, so cluster/job-specific overrides win.
   if [[ -n "${COSMOS3_EXTRA_ENV_FILE:-}" ]]; then
     [[ -r "$COSMOS3_EXTRA_ENV_FILE" ]] || die "COSMOS3_EXTRA_ENV_FILE is not readable: $COSMOS3_EXTRA_ENV_FILE"
-    # shellcheck disable=SC1090
-    source "$COSMOS3_EXTRA_ENV_FILE"
+    source_env_file "$COSMOS3_EXTRA_ENV_FILE"
   elif [[ -r "$BOOTSTRAP_DIR/cosmos3-train-env.sh" ]]; then
-    # shellcheck disable=SC1090
-    source "$BOOTSTRAP_DIR/cosmos3-train-env.sh"
+    source_env_file "$BOOTSTRAP_DIR/cosmos3-train-env.sh"
   fi
 
   export LD_LIBRARY_PATH=
