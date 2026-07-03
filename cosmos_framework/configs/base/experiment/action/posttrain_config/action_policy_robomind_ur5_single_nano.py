@@ -1,14 +1,14 @@
 # UR5e post-training — local addition, not part of upstream Cosmos3.
 
-"""``action_policy_robomind_ur5_single_nano`` — single-arm UR5e policy SFT (RoboLab-bound).
+"""``action_policy_robomind_ur5_single_nano`` — single-arm RoboMIND1-UR joint-space policy SFT (RoboLab-bound).
 
-Post-trains Cosmos3-Nano on **single-arm** RoboMIND UR5e data (7-D `[joint(6), gripper(1)]`), the
-policy-DROID analogue evaluated on a single-arm robot. Source: RoboMIND 1.2 ``h5_ur_1rgb`` converted
-to LeRobot v3 (the single arm lands in the ``left`` slot). Point ``UR5_SINGLE_ROOT`` at it.
+Post-trains Cosmos3-Nano on **single-arm** RoboMIND 1.0 UR data (7-D `[joint(6), gripper(1)]`), the
+policy-DROID analogue evaluated on a single-arm UR5 target. Source: RoboMIND 1.0 UR converted
+to LeRobot under `/mlp_vepfs/.../lerobot` (the single arm lands in the ``left`` slot). Point ``UR5_SINGLE_ROOT`` at it.
 
 Usage (1 node, 8 GPU)::
 
-    UR5_SINGLE_ROOT=/path/to/robomind_ur5_single_lerobot/success \\
+    UR5_SINGLE_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5 \\
     BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir> WAN_VAE_PATH=<Wan2.2_VAE.pth> \\
     torchrun --nproc_per_node=8 -m cosmos_framework.scripts.train \\
         --sft-toml examples/toml/sft_config/action_policy_robomind_ur5_single_repro.toml

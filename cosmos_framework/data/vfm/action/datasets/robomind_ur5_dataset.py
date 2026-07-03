@@ -1,15 +1,11 @@
 # UR5e post-training — local addition, not part of upstream Cosmos3.
 
-"""RoboMIND UR5(e) LeRobot dataset for Cosmos Action policy post-training (two cases).
+"""RoboMIND UR joint-space LeRobot dataset for Cosmos Action policy post-training.
 
-Reads a LeRobot v3 dataset produced by ``tools/convert_robomind_hdf5_to_lerobot.py`` from either
-RoboMIND source, selected by ``which_arm``:
-
-  * ``which_arm="left"`` — **single-arm** UR5e (7-D), the RoboLab-bound case. Source: RoboMIND 1.2
-    ``h5_ur_1rgb`` (``puppet/joint_position (T,7)`` = 6 joints + gripper, single ``camera_top``).
-    The single arm is written into the ``left`` feature slot by the converter.
-  * ``which_arm="dual"`` — **dual-arm** UR5e (14-D). Source: RoboMIND 2.0 (``*_position_align``, six
-    cameras); schema verified on a real ``trajectory.hdf5``.
+Reads a LeRobot dataset produced by ``tools/convert_robomind_hdf5_to_lerobot.py``.
+The primary Case B path is ``which_arm="left"``: single-arm RoboMIND 1.0 UR
+(7-D, RoboLab-bound). ``which_arm="dual"`` remains available for dual-arm
+RoboMIND UR data (14-D), but is not mixed with Berkeley EEF-space training.
 
 Action layout::
 
@@ -19,16 +15,16 @@ Action layout::
 Actions are absolute joint positions, raw (``action_normalization=None``); with ``use_state=True``
 the initial observed state is prepended → ``(chunk + 1, dim)``. The action stream is ``puppet``
 (executed) by default; the converter can emit ``master`` (leader) instead. The visual canvas is
-auto-detected from the cameras present (1 view for ``h5_ur_1rgb``; 3-view DROID-style for RoboMIND 2.0).
+auto-detected from the cameras present and rendered into a fixed three-view canvas; missing views are zero-padded.
 """
 
+import json
 import random
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from lerobot.datasets.video_utils import decode_video_frames
 
 from cosmos_framework.data.vfm.action.action_spec import ActionSpec, Gripper, Joint, build_action_spec
@@ -37,16 +33,18 @@ from cosmos_framework.data.vfm.action.datasets.action_sft_dataset import (
     ActionSFTDataset,
 )
 from cosmos_framework.data.vfm.action.datasets.base_dataset import ActionBaseDataset
+from cosmos_framework.data.vfm.action.datasets.canvas_utils import concat_three_view_canvas, zero_like_view
 from cosmos_framework.data.vfm.action.transforms import ActionTransformPipeline
 
 PoseConvention = Literal["backward_framewise"]
 Viewpoint = Literal["concat_view"]
 WhichArm = Literal["dual", "left", "right"]
+CanvasLayout = Literal["auto", "three_view_zero_pad"]
 
 _UR5E_ARM_DOF = 6  # UR5e is a 6-DoF arm (confirmed: arm_*_position_align is (T, 6)).
 
 # --- LeRobot v3 feature names, written by tools/convert_robomind_hdf5_to_lerobot.py -------------
-# All six RoboMIND color cameras are converted; the canvas below uses a 3-view subset by default.
+# Known RoboMIND color camera names. The converter writes the cameras present in each source format.
 _IMAGE_FEATURES_ALL: dict[str, str] = {
     "top": "observation.images.camera_top",
     "front": "observation.images.camera_front",
@@ -56,7 +54,7 @@ _IMAGE_FEATURES_ALL: dict[str, str] = {
     "wrist_right": "observation.images.camera_wrist_right",
 }
 # Canvas auto-detection preference order (used when canvas_views is None). Whatever cameras the
-# converter actually wrote drive the layout: 1 present -> single view (RoboMIND 1.2 h5_ur_1rgb);
+# converter actually wrote drive the layout: 1 present -> top view plus zero-padded missing views;
 # an overview + both wrists -> DROID-style 3-view (overview full-width top, wrists half-res bottom,
 # ~540x640 at a 360x640 store size), matching the RoboMIND 2.0 VLM's front+wrists observation set.
 _CANVAS_PREFERENCE: tuple[str, ...] = ("front", "top", "wrist_left", "wrist_right", "left", "right")
@@ -67,6 +65,22 @@ _ARM_JOINT_ACTION = {"left": "action.arm_left_joint", "right": "action.arm_right
 _GRIPPER_ACTION = {"left": "action.gripper_left", "right": "action.gripper_right"}
 _ARM_JOINT_STATE = {"left": "observation.state.arm_left_joint", "right": "observation.state.arm_right_joint"}
 _GRIPPER_STATE = {"left": "observation.state.gripper_left", "right": "observation.state.gripper_right"}
+
+
+def _strided_window_counts(ep_counts: np.ndarray, chunk_length: int, sample_stride: int) -> np.ndarray:
+    valid_starts = np.maximum(0, ep_counts.astype(np.int64) - int(chunk_length))
+    return ((valid_starts + int(sample_stride) - 1) // int(sample_stride)).astype(np.int64)
+
+
+def _resolve_fps(root: str, fps: float | None) -> float:
+    if fps is not None:
+        return float(fps)
+    info_path = Path(root) / "meta" / "info.json"
+    if info_path.is_file():
+        info = json.loads(info_path.read_text())
+        if info.get("fps") is not None:
+            return float(info["fps"])
+    return 7.0
 
 
 class RoboMINDUR5Dataset(ActionBaseDataset):
@@ -82,7 +96,7 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
     def __init__(
         self,
         root: str,
-        fps: float = 7.0,  # RoboMIND-UR5 sample measured ~7.1 Hz (integer-second stamps); confirm per subset.
+        fps: float | None = None,  # None -> read LeRobot meta/info.json fps, fallback 7.0.
         chunk_length: int = 32,
         mode: str = "policy",
         which_arm: WhichArm = "dual",
@@ -95,6 +109,7 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
         # controller / action convention with them, set gripper_invert=True. Confirm vs your mapping.
         gripper_invert: bool = False,
         canvas_views: tuple[str, ...] | None = None,  # None -> auto-detect from cameras present.
+        canvas_layout: CanvasLayout = "three_view_zero_pad",
         action_normalization: str | None = None,  # joint_pos -> raw, no normalization.
         sample_stride: int = 1,
     ) -> None:
@@ -102,21 +117,17 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
             raise ValueError(f"which_arm must be 'dual' | 'left' | 'right', got {which_arm!r}.")
         if viewpoint != "concat_view":
             raise NotImplementedError("RoboMINDUR5Dataset only supports concat_view.")
-        if canvas_views is not None:
-            for v in canvas_views:
-                if v not in _IMAGE_FEATURES_ALL:
-                    raise ValueError(f"Unknown canvas view {v!r}; choose from {sorted(_IMAGE_FEATURES_ALL)}.")
-
         self._which_arm = which_arm
         self._arms: list[str] = ["left", "right"] if which_arm == "dual" else [which_arm]
         self._use_state = bool(use_state)
         self._gripper_invert = bool(gripper_invert)
+        self._canvas_layout = canvas_layout
         # Single- and dual-arm map to distinct embodiment ids (7-D vs 14-D action projection).
         domain_name = "robomind-ur5-dual" if which_arm == "dual" else "robomind-ur5-single"
         super().__init__(
             root=root,
             domain_name=domain_name,
-            fps=fps,
+            fps=_resolve_fps(root, fps),
             chunk_length=chunk_length,
             mode=mode,
             pose_convention=pose_convention,
@@ -126,9 +137,11 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
             sample_stride=sample_stride,
         )
 
+        self._require_split_schema()
+        self._action_dim = len(self._arms) * (_UR5E_ARM_DOF + 1)
+
         # Resolve the canvas to the cameras actually present in the dataset (LeRobot info.json).
         self._canvas_features = self._resolve_canvas(canvas_views)
-
 
         # Group the (index-sorted) rows into contiguous per-episode blocks and keep only
         # within-episode chunk windows, so a window never straddles two episodes (mirrors DROID's
@@ -137,11 +150,13 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
         assert np.all(np.diff(episode_indices) >= 0), "episode_index is not contiguous after sorting by frame index"
         _, ep_starts, ep_counts = np.unique(episode_indices, return_index=True, return_counts=True)
         self._ep_starts = ep_starts.astype(np.int64)
-        self._valid_cum = np.cumsum(np.maximum(0, ep_counts - self._chunk_length)).astype(np.int64)
+        self._valid_cum = np.cumsum(_strided_window_counts(ep_counts, self._chunk_length, self._sample_stride)).astype(
+            np.int64
+        )
 
     @property
     def action_dim(self) -> int:
-        return len(self._arms) * (_UR5E_ARM_DOF + 1)  # 14 (dual) or 7 (single)
+        return int(self._action_dim)  # 14 (dual) or 7 (single)
 
     def _action_spec(self) -> ActionSpec:
         components: list = []
@@ -163,7 +178,7 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
         # Map the flat sample index to a within-episode frame window.
         ep = int(np.searchsorted(self._valid_cum, idx, side="right"))
         prev = int(self._valid_cum[ep - 1]) if ep > 0 else 0
-        start = int(self._ep_starts[ep]) + (idx - prev)
+        start = int(self._ep_starts[ep]) + (idx - prev) * self._sample_stride
         observation_rows = self._rows[start : start + self._chunk_length + 1]
         episode = self._episodes[int(observation_rows[0]["episode_index"])]
 
@@ -181,26 +196,61 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
         )
 
     def _resolve_canvas(self, canvas_views: tuple[str, ...] | None) -> list[str]:
-        """Resolve the canvas to LeRobot image-feature names present in this dataset. Explicit
-        ``canvas_views`` (role keys) are validated against what the converter wrote; otherwise the
-        cameras present are auto-selected: an overview + both wrists (DROID-style) when available,
-        else up to 3 in preference order, else the single available view (RoboMIND 1.2 h5_ur_1rgb)."""
+        """Resolve the canvas to LeRobot image-feature names present in this dataset.
+
+        Explicit ``canvas_views`` may use RoboMIND role keys (``front``, ``wrist_left``) or exact
+        LeRobot feature names. Without an explicit list, RoboMIND cameras keep the
+        DROID-style overview+wrists priority, with missing views zero-padded by the loader.
+        """
         available = {k for k in self._info.get("features", {}) if k.startswith("observation.images.")}
         if canvas_views is not None:
-            feats = [_IMAGE_FEATURES_ALL[v] for v in canvas_views]
+            feats = []
+            for view in canvas_views:
+                if view in _IMAGE_FEATURES_ALL:
+                    feats.append(_IMAGE_FEATURES_ALL[view])
+                elif view.startswith("observation.images."):
+                    feats.append(view)
+                else:
+                    feats.append(f"observation.images.{view}")
             missing = [f for f in feats if f not in available]
             if missing:
-                raise ValueError(f"canvas_views requests cameras not in the dataset: {missing}. Have {sorted(available)}.")
+                raise ValueError(
+                    f"canvas_views requests cameras not in the dataset: {missing}. Have {sorted(available)}."
+                )
             return feats
+
         present = [r for r in _CANVAS_PREFERENCE if _IMAGE_FEATURES_ALL[r] in available]
-        if not present:
-            raise ValueError(f"No known observation.images.* cameras in the dataset (have {sorted(available)}).")
         if "wrist_left" in present and "wrist_right" in present and any(r in present for r in ("front", "top")):
             overview = next(r for r in ("front", "top") if r in present)
-            chosen = [overview, "wrist_left", "wrist_right"]
-        else:
-            chosen = present[:3]
-        return [_IMAGE_FEATURES_ALL[r] for r in chosen]
+            return [_IMAGE_FEATURES_ALL[r] for r in (overview, "wrist_left", "wrist_right")]
+        if present:
+            return [_IMAGE_FEATURES_ALL[r] for r in present[:3]]
+
+        raise ValueError(
+            "No RoboMIND UR camera features were found. Expected one or more of "
+            f"{sorted(_IMAGE_FEATURES_ALL.values())}; have {sorted(available)}."
+        )
+
+    def _require_split_schema(self) -> None:
+        features = self._info.get("features", {})
+        split_required = []
+        for arm in self._arms:
+            split_required.extend(
+                [
+                    _ARM_JOINT_ACTION[arm],
+                    _GRIPPER_ACTION[arm],
+                    _ARM_JOINT_STATE[arm],
+                    _GRIPPER_STATE[arm],
+                ]
+            )
+        if all(key in features for key in split_required):
+            return
+        raise ValueError(
+            "Unsupported RoboMIND UR joint-space schema. Expected split fields "
+            f"{split_required}. Generic LeRobot `action` datasets such as Berkeley AUTOLab UR5 "
+            "must use the Berkeley EEF dataset adapter instead; "
+            f"available features: {sorted(features)}"
+        )
 
     def _view_description(self) -> str:
         arm_txt = "dual-arm" if self._which_arm == "dual" else "single-arm"
@@ -258,18 +308,21 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
             for feat in self._canvas_features
         ]
 
+        if self._canvas_layout == "three_view_zero_pad":
+            if not frames:
+                raise ValueError("No frames decoded for UR5 canvas.")
+            top = frames[0]
+            left = frames[1] if len(frames) > 1 else zero_like_view(top)
+            right = frames[2] if len(frames) > 2 else zero_like_view(top)
+            return concat_three_view_canvas(top, left, right)
+
         if len(frames) == 1:
             return frames[0]
         if len(frames) == 2:
             return torch.cat(frames, dim=-1)  # side by side
         if len(frames) == 3:
             # DROID-style: overview on top (full res), the two wrists half-res side-by-side below.
-            top, left, right = frames
-            _, _, h, w = top.shape
-            half_h, half_w = h // 2, w // 2
-            left = F.interpolate(left, size=(half_h, half_w), mode="bilinear", align_corners=False)
-            right = F.interpolate(right, size=(half_h, half_w), mode="bilinear", align_corners=False)
-            return torch.cat([top, torch.cat([left, right], dim=-1)], dim=-2)
+            return concat_three_view_canvas(frames[0], frames[1], frames[2])
         if len(frames) == 4:
             top = torch.cat([frames[0], frames[1]], dim=-1)
             bottom = torch.cat([frames[2], frames[3]], dim=-1)
@@ -296,13 +349,14 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
 def get_action_robomind_ur5_sft_dataset(
     *,
     root: str,
-    fps: float = 7.0,  # RoboMIND-UR5 sample measured ~7.1 Hz (integer-second stamps); confirm per subset.
+    fps: float | None = None,  # None -> read LeRobot meta/info.json fps, fallback 7.0.
     chunk_length: int = 32,
     mode: str = "policy",
     which_arm: WhichArm = "dual",
     use_state: bool = True,
     gripper_invert: bool = False,
     canvas_views: tuple[str, ...] | None = None,
+    canvas_layout: CanvasLayout = "three_view_zero_pad",
     action_normalization: str | None = None,
     viewpoint: str = "concat_view",
     resolution: str | int = "480",
@@ -328,6 +382,7 @@ def get_action_robomind_ur5_sft_dataset(
         use_state=use_state,
         gripper_invert=gripper_invert,
         canvas_views=canvas_views,
+        canvas_layout=canvas_layout,
         action_normalization=action_normalization,
     )
     transform = ActionTransformPipeline(

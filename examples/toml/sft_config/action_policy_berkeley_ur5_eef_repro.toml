@@ -1,0 +1,51 @@
+# UR5 post-training - local addition, not part of upstream Cosmos3.
+
+# ============================================================================
+# Berkeley AUTOLab UR5 EEF-space action-policy SFT - run config for the
+# `action_policy_berkeley_ur5_eef_nano` experiment.
+#
+# Action layout: 10D [EEF translation delta(3), rot6d delta(6), gripper(1)].
+# This is separate from RoboMIND UR joint-space training.
+#
+# Env required:
+#   BERKELEY_UR5_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/berkeley_autolab_ur5
+#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
+#   WAN_VAE_PATH=<Wan2.2_VAE.pth>
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_berkeley_ur5_eef_nano"
+project      = "cosmos3_action"
+group        = "action_sft"
+name         = "action_policy_berkeley_ur5_eef_repro"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[scheduler]
+cycle_lengths = [3000]
+
+[trainer]
+max_iter     = 3000
+logging_iter = 50
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500
+
+# The experiment uses lr=1e-4 and 2x action-head multipliers for the full-batch shape.
+# Scale lr down for smaller effective batch, and stop early if held-out task/success proxy degrades.

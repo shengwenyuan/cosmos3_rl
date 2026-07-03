@@ -1,11 +1,11 @@
 # UR5e post-training — local addition, not part of upstream Cosmos3.
 
-"""Shared builder for the RoboMIND UR5(e) action-policy SFT recipes.
+"""Shared builder for the RoboMIND UR action-policy SFT recipes.
 
 Two registered experiments share this body (see ``action_policy_robomind_ur5_single_nano`` and
-``action_policy_robomind_ur5_dual_nano``): a UR5e analogue of ``action_policy_droid_nano`` — same
+``action_policy_robomind_ur5_dual_nano``): a UR joint-space analogue of ``action_policy_droid_nano`` — same
 training stack (PackingDataLoader + RankPartitionedDataLoader + episode-shuffle stream; generation +
-action heads trained fresh from the public ``nvidia/Cosmos3-Nano`` base), feeding the RoboMIND UR5e
+action heads trained fresh from the public ``nvidia/Cosmos3-Nano`` base), feeding the RoboMIND UR
 dataset (``joint_pos`` + ``use_state``, raw/un-normalized) through ``ActionTransformPipeline``.
 
 Convert the RoboMIND HDF5 to LeRobot v3 first (``tools/convert_robomind_hdf5_to_lerobot.py``).
@@ -13,21 +13,20 @@ Convert the RoboMIND HDF5 to LeRobot v3 first (``tools/convert_robomind_hdf5_to_
 
 import copy
 
-from cosmos_framework.utils.lazy_config import LazyCall as L
-from cosmos_framework.utils.lazy_config import LazyDict
-
 from cosmos_framework.configs.base.experiment.sft.models.nano_model_config import NANO_MODEL_CONFIG
+from cosmos_framework.data.vfm.action.datasets.robomind_ur5_dataset import get_action_robomind_ur5_sft_dataset
 from cosmos_framework.data.vfm.joint_dataloader import (
     PackingDataLoader,
     RankPartitionedDataLoader,
 )
-from cosmos_framework.data.vfm.action.datasets.robomind_ur5_dataset import get_action_robomind_ur5_sft_dataset
+from cosmos_framework.utils.lazy_config import LazyCall as L
+from cosmos_framework.utils.lazy_config import LazyDict
 
 
 def build_robomind_ur5_experiment(*, name: str, which_arm: str, root_env: str) -> LazyDict:
-    """Build a RoboMIND UR5e policy SFT experiment.
+    """Build a RoboMIND UR policy SFT experiment.
 
-    ``which_arm="left"`` → single-arm 7-D (RoboMIND 1.2 ``h5_ur_1rgb``, RoboLab-bound);
+    ``which_arm="left"`` -> single-arm 7-D (RoboMIND 1.0 UR, RoboLab-bound);
     ``which_arm="dual"`` → dual-arm 14-D (RoboMIND 2.0). ``root_env`` is the env var holding the
     converted LeRobot dataset path (e.g. ``UR5_SINGLE_ROOT`` / ``UR5_DUAL_ROOT``).
     """
@@ -47,6 +46,7 @@ def build_robomind_ur5_experiment(*, name: str, which_arm: str, root_env: str) -
                         "basic",
                         "optimization",
                         "job_monitor",
+                        "training_stats",
                     ]
                 },
                 {"override /ema": "power"},
@@ -134,7 +134,7 @@ def build_robomind_ur5_experiment(*, name: str, which_arm: str, root_env: str) -
                 enable_gcs_patch_in_boto3=True,
                 keys_not_to_resume=[],
                 # Skip net_ema (EMA warm-starts from net, see dcp.py) and the action heads, so they
-                # init fresh from the base (the base has no UR5e-trained action heads).
+                # init fresh from the base (the base has no UR-trained action heads).
                 keys_to_skip_loading=[
                     "net_ema.",
                     "action2llm",
@@ -185,7 +185,7 @@ def build_robomind_ur5_experiment(*, name: str, which_arm: str, root_env: str) -
                             ratio=1,
                             dataset=L(get_action_robomind_ur5_sft_dataset)(
                                 root="${oc.env:" + root_env + "}",
-                                fps=7.0,  # mind2 sample ~7.1 Hz; ur_1rgb has no timestamps — set to your data.
+                                fps=None,  # Read LeRobot meta/info.json fps; fallback 7.0 if absent.
                                 chunk_length=32,
                                 mode="policy",  # single-task policy (avoid the multi-task "joint" mode)
                                 use_state=True,
@@ -196,7 +196,8 @@ def build_robomind_ur5_experiment(*, name: str, which_arm: str, root_env: str) -
                                 action_normalization=None,
                                 viewpoint="concat_view",
                                 resolution="480",
-                                # canvas_views=None -> auto (1 view for h5_ur_1rgb; 3-view for RoboMIND 2.0)
+                                # Fixed three-view canvas; missing views are zero-padded by the dataset.
+                                canvas_layout="three_view_zero_pad",
                                 max_action_dim="${model.config.max_action_dim}",
                                 cfg_dropout_rate=0.1,
                                 tokenizer_config="${model.config.vlm_config.tokenizer}",
