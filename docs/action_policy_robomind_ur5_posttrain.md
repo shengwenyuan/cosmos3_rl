@@ -1,117 +1,127 @@
-<!-- UR5e post-training — local addition, not part of upstream Cosmos3. -->
+# Cosmos3-Nano RoboMIND1-UR Joint-Space Post-Training
 
-# Cosmos3-Nano RoboMIND UR5(e) Action-Policy Post-Training
+This document covers **Case B** from `tmps/UR5_WORKING_PIPELINE.md`: RoboMIND 1.0 UR joint-space post-training for a UR5 target embodiment.
 
-Post-train [Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) into a UR5(e)
-robot-manipulation policy on [RoboMIND](https://huggingface.co/datasets/x-humanoid-robomind/RoboMIND)
-data, the way NVIDIA post-trained [Cosmos3-Nano-Policy-DROID](./action_policy_droid_posttrain.md):
-resume from the **mid-trained** Cosmos3-Nano, initialize the action encoder / decode-MLP / embed
-tokens **fresh**, apply a **5× LR** on the action params, and predict **absolute joint-position
-action chunks** from proprioceptive state + video. Reuses the whole DROID policy stack.
+Berkeley AUTOLab UR5 is now a separate **Case A** EEF-space path with its own dataset adapter and recipe. Do not train Berkeley through this RoboMIND joint-space recipe.
 
-## Two cases (one per RoboMIND download)
+## Case B Summary
 
-| case | source | arms | action | domain | experiment |
-| --- | --- | --- | --- | --- | --- |
-| **single** | RoboMIND **1.2** `h5_ur_1rgb` | 1× UR5e 6-DoF | **7-D** `[joint(6), gripper(1)]` | `robomind-ur5-single` (id 30) | `action_policy_robomind_ur5_single_nano` |
-| **dual** | RoboMIND **2.0** | 2× UR5e 6-DoF | **14-D** `[L_joint(6), L_grip, R_joint(6), R_grip]` | `robomind-ur5-dual` (id 31) | `action_policy_robomind_ur5_dual_nano` |
-
-The **single** case is the RoboLab-bound one: RoboLab / RoboArena evaluate a **single-arm** robot, and
-UR5e is 6-DoF → 7-D. (The DROID benchmark robot is a 7-joint Franka; a UR5e policy is a *different*
-robot — serving it is handled by the user's own UR5e RoboLab setup.) The **dual** case is a second
-embodiment (not directly RoboLab-runnable). Both resume from the mid-trained Cosmos3-Nano with fresh
-action heads (paper §4.2.5).
-
-## Prerequisites
-- [Setup](../README.md#setup) — training extras (`uv sync --all-extras --group=cu130-train`).
-- Converter deps on the run host: `h5py`, `pillow`, `lerobot`.
-- Domain ids 30/31 sit at the top of the 32-slot embodiment range (NVIDIA uses ≤20), leaving 21–29
-  as a buffer against future upstream domains.
-
-## Step 1 — Convert RoboMIND HDF5 → LeRobot v3 (per case, into its own path)
-
-```shell
-# SINGLE (RoboMIND 1.2 h5_ur_1rgb). No in-file fps → pass --fps for your data's rate.
-python tools/convert_robomind_hdf5_to_lerobot.py \
-  --src /path/to/h5_ur_1rgb --out /path/to/robomind_ur5_single_lerobot/success \
-  --repo-id local/robomind_ur5_single --fps 15
-
-# DUAL (RoboMIND 2.0)
-python tools/convert_robomind_hdf5_to_lerobot.py \
-  --src /path/to/robomind2_ur5 --out /path/to/robomind_ur5_dual_lerobot/success \
-  --repo-id local/robomind_ur5_dual
-```
-
-The converter **auto-detects** the format per file and **asserts one format per run** (convert each
-download separately). Each result must contain `meta/info.json`. Key format specifics:
-
-- **`ur_1rgb`** (RoboMIND 1.2, schema `tmps/mind1_all_robot_h5_info_v1.2.md`): reads
-  `puppet/joint_position (T,7)` = 6 UR joints + gripper (single arm → written into the `left` slot);
-  single camera `observations/rgb_images/camera_top`, stored **BGR** → swapped to RGB; **task parsed
-  from the directory path** (`<task>/success_episodes/…`); **fps must be supplied** (no timestamps).
-- **`mind2_dual`** (RoboMIND 2.0, verified on a real file): both `arm_{L,R}_position_align` + grippers,
-  cameras `camera_{top,front,wrist_left,wrist_right}` (RGB JPEG), task from `/metadata`, fps from
-  timestamps.
-- `--action-source {puppet,master}` (default `puppet` = executed); `--bgr {auto,true,false}`;
-  `--store-hw 360 640`. The dataset auto-builds the canvas from the cameras present (1 view for
-  `ur_1rgb`; 3-view DROID-style front+wrists for RoboMIND 2.0).
-
-> The `mind2_dual` HDF5 read + JPEG decode were validated on a real file. The LeRobot **writer** calls
-> and the `ur_1rgb` read (BGR swap, path-based task, fps) carry `TODO(verify)` until exercised on a
-> host with `lerobot` and a real `h5_ur_1rgb` file.
-
-## Step 2 — Convert the base checkpoint & launch
-
-```shell
-python -m cosmos_framework.scripts.convert_model_to_dcp \
-  --checkpoint-path Cosmos3-Nano -o $BASE_CHECKPOINT_PATH
-
-# SINGLE (bridged: DATASET_PATH -> UR5_SINGLE_ROOT)
-export DATASET_PATH=/path/to/robomind_ur5_single_lerobot/success
-export BASE_CHECKPOINT_PATH=/path/to/base_checkpoint
-export WAN_VAE_PATH=/path/to/Wan2.2_VAE.pth
-export NPROC_PER_NODE=8
-bash examples/launch_sft_action_policy_robomind_ur5_single.sh
-
-# DUAL: bash examples/launch_sft_action_policy_robomind_ur5_dual.sh  (DATASET_PATH -> UR5_DUAL_ROOT)
-```
-
-Single-node smoke:
-```shell
-export EXTRA_TAIL_OVERRIDES="trainer.max_iter=10 checkpoint.save_iter=10 \
-                             dataloader_train.max_samples_per_batch=8"
-bash examples/launch_sft_action_policy_robomind_ur5_single.sh
-```
-Multi-node HSDP: set `model.parallelism.data_parallel_replicate_degree = <num_nodes>` (shard 8).
-
-## Recipe (both cases)
-
-| knob | value |
+| item | value |
 | --- | --- |
-| init | `Cosmos3-Nano`; action encoder / decode-MLP / embed tokens **fresh** (skipped on load) |
-| action | `joint_pos`, raw / un-normalized; `use_state=true` → `(chunk+1, dim)` |
-| resolution / canvas | `480`; `concat_view`, auto from cameras present (1 view / 3-view 540×640) |
-| chunk length | `32` (`encode_exact_durations=[33]`) |
-| lr | `2e-4` (full-batch), **5×** on the action heads; FusedAdam; linear decay |
-| shuffle | episode-shuffle stream (grad-norm stability) |
+| dataset | RoboMIND 1.0 UR subset converted to LeRobot |
+| expected path | `/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5` |
+| action | **7D** `[joint(6), gripper(1)]` absolute UR joint targets |
+| domain | `robomind-ur5-single` |
+| experiment | `action_policy_robomind_ur5_single_nano` |
+| recipe TOML | `examples/toml/sft_config/action_policy_robomind_ur5_single_repro.toml` |
+| launcher | `examples/launch_sft_action_policy_robomind_ur5_single.sh` |
 
-## Checkpoints & Serving
-- Saved every `save_iter`; resumable (same `job.name`); export via
-  `cosmos_framework.scripts.export_model`.
-- **Serving is handled by the user's UR5e RoboLab setup.** Keep in mind the shipped
-  `action_policy_server_robolab.py` is hardcoded to 7 Franka joints + a DROID canvas and flips the
-  gripper (`1-g`) on output; a 6-joint UR5e needs the user's own server/embodiment. Match the trained
-  7-D output + camera canvas to that setup, and confirm gripper polarity there (the dataset keeps the
-  gripper raw; set `gripper_invert=True` to match the DROID/`1-g` convention if needed).
+The 7D joint head is fresh. Do not reuse DROID's 8D Franka joint head.
 
-## Files (all local additions)
-- `tools/convert_robomind_hdf5_to_lerobot.py` — dual-format HDF5 → LeRobot v3 converter.
-- `cosmos_framework/data/vfm/action/datasets/robomind_ur5_dataset.py` — `RoboMINDUR5Dataset` + factory.
-- `.../action/posttrain_config/_robomind_ur5_common.py` + `action_policy_robomind_ur5_{single,dual}_nano.py`.
-- `examples/toml/sft_config/action_policy_robomind_ur5_{single,dual}_repro.toml` +
-  `examples/launch_sft_action_policy_robomind_ur5_{single,dual}.sh`.
-- Registry edits: `domain_utils.py` — **`EMBODIMENT_TO_DOMAIN_ID`** only (`robomind-ur5-single` id 30,
-  `robomind-ur5-dual` id 31; used by training + serving). Intentionally **not** added to
-  `EMBODIMENT_TO_RAW_ACTION_DIM` (that dict is the ee_pose/FD-inference width; the joint_pos policy
-  takes its width from the server's `action_space`, same as DROID's joint_pos). Plus
-  `configs/base/config.py` (registers both experiments) and `datasets/__init__.py` (exports the class).
+## Dataset Path
+
+RoboMIND1-UR LeRobot data is expected under the fast-disk LeRobot area:
+
+```bash
+export DATASET_PATH=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5
+export UR5_SINGLE_ROOT=$DATASET_PATH
+```
+
+The launcher default is already set to this path, but exporting the variables keeps runs explicit.
+
+## Required Dataset Schema
+
+The RoboMIND joint reader now requires split joint/gripper fields. It does not accept anonymous generic LeRobot `action` datasets.
+
+Expected single-arm split fields:
+
+```text
+action.arm_left_joint               # shape [6]
+action.gripper_left                 # shape [1] or scalar
+observation.state.arm_left_joint     # shape [6]
+observation.state.gripper_left       # shape [1] or scalar
+observation.images.camera_top        # at least one camera is required
+```
+
+Additional cameras are accepted. Missing views are zero-padded into the fixed three-view canvas.
+
+## Canvas Policy
+
+The joint-space recipe uses a fixed three-view canvas:
+
+```text
+top row:        real overview/top camera
+bottom-left:    second selected camera, if present; otherwise zeros
+bottom-right:   third selected camera, if present; otherwise zeros
+```
+
+This keeps the visual layout stable even when RoboMIND1-UR only provides one camera.
+
+## Training Setup
+
+```bash
+cd /root/code/cosmos-framework
+source /root/.bashrc
+cosmos3-activate
+export LD_LIBRARY_PATH=
+
+export DATASET_PATH=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5
+export UR5_SINGLE_ROOT=$DATASET_PATH
+export BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
+export WAN_VAE_PATH=<Wan2.2_VAE.pth>
+export IMAGINAIRE_OUTPUT_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/outputs/train
+```
+
+Run after the dataset is migrated:
+
+```bash
+bash examples/launch_sft_action_policy_robomind_ur5_single.sh
+```
+
+Smoke override after data/checkpoints exist:
+
+```bash
+export EXTRA_TAIL_OVERRIDES="trainer.max_iter=10 checkpoint.save_iter=10 dataloader_train.max_samples_per_batch=8"
+bash examples/launch_sft_action_policy_robomind_ur5_single.sh
+```
+
+## Config Notes
+
+| setting | value |
+| --- | --- |
+| base LR | `2e-4` for the full multi-node batch shape |
+| action-head multipliers | `5x` for `action2llm`, `llm2action`, `action_modality_embed` |
+| fresh params | action encoder, decoding MLP, action embedding tokens, action positional embeddings |
+| action normalization | `None` for raw absolute joint targets |
+| W&B | TOML sets `wandb_mode = "online"`; export `WANDB_API_KEY` if logging is desired |
+
+Scale LR down for smaller effective batch sizes.
+
+## Deployment
+
+RoboLab joint-space deployment is direct:
+
+```text
+model 7D output -> UR5 joint targets + gripper scalar -> RoboLab client
+```
+
+No IK is needed. Still verify joint ordering, units, and gripper polarity against the RoboLab client before evaluation.
+
+## Separate Berkeley EEF Path
+
+Berkeley AUTOLab UR5 uses a different recipe:
+
+```text
+examples/toml/sft_config/action_policy_berkeley_ur5_eef_repro.toml
+examples/launch_sft_action_policy_berkeley_ur5_eef.sh
+```
+
+That path converts Berkeley `action[7]` delta-RPY into a 10D EEF delta action. It must be validated with FK plots and requires an EEF-to-joint IK deployment bridge before RoboLab evaluation.
+
+## Code Pointers
+
+- Joint dataset: `cosmos_framework/data/vfm/action/datasets/robomind_ur5_dataset.py`
+- Berkeley EEF dataset: `cosmos_framework/data/vfm/action/datasets/berkeley_ur5_eef_dataset.py`
+- Canvas helper: `cosmos_framework/data/vfm/action/datasets/canvas_utils.py`
+- Joint experiment: `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_robomind_ur5_single_nano.py`
+- Berkeley EEF experiment: `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_berkeley_ur5_eef_nano.py`

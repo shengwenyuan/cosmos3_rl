@@ -1,13 +1,13 @@
 # UR5e post-training — local addition, not part of upstream Cosmos3.
 
 # ============================================================================
-# RoboMIND UR5(e) SINGLE-ARM action-policy SFT — run config for the
+# RoboMIND1-UR SINGLE-ARM joint-space action-policy SFT — run config for the
 # `action_policy_robomind_ur5_single_nano` experiment (7-D joint_pos, RoboLab-bound).
 # Recipe knobs (optimizer/lr, scheduler, count-based batch, action-head skip-load,
 # dataset knobs) live in the registered experiment; this file sets run-level scalars.
 #
 # Env required:
-#   UR5_SINGLE_ROOT=/path/to/robomind_ur5_single_lerobot/success  # RoboMIND 1.2 h5_ur_1rgb -> LeRobot v3
+#   UR5_SINGLE_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5  # RoboMIND 1.0 UR -> LeRobot
 #   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>                   # convert_model_to_dcp; see docs
 #   WAN_VAE_PATH=<Wan2.2_VAE.pth>
 #   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root                  # persist checkpoints
