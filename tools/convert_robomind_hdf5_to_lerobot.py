@@ -128,7 +128,7 @@ class Args:
     """Print progress every N successfully saved episodes."""
 
     image_writer_processes: int = 0
-    image_writer_threads: int = 0
+    image_writer_threads: int = 4
     batch_encoding_size: int = 1
     video_codec: str = "libsvtav1"
     video_files_size_mb: int | None = None
