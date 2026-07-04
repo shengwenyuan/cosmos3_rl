@@ -1,4 +1,4 @@
 interface:
   display_name: "Cosmos3 RoboLab Server Client"
-  short_description: "Run Cosmos3 policy server with RoboLab client"
-  default_prompt: "Use $cosmos3-robolab-server-client to run a Cosmos3 policy server and RoboLab client batch with consistent args."
+  short_description: "Run Cosmos3 policy server with robot-specific RoboLab clients"
+  default_prompt: "Use $cosmos3-robolab-server-client to choose the right RoboLab robot runner, start the Cosmos3 policy server, and run the client with consistent args."

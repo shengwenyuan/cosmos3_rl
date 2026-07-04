@@ -1,6 +1,6 @@
 ---
 name: cosmos3-robolab-server-client
-description: Run and resume Cosmos3 policy-server plus RoboLab client evaluation jobs, including remote client access, historical launch-argument consistency, asset/render failure monitoring, and clean continuation of interrupted atomic_pick or atomic_pnp batches. Use when the user asks to start a Cosmos3 action policy server for RoboLab, run or resume RoboLab tasks over SSH, audit prior RoboLab batch logs, preserve output directories, or explain/choose RoboLab evaluation arguments such as --video-mode, --num-runs, --headless, remote host/port, seed, and output folder.
+description: Run and resume Cosmos3 policy-server plus RoboLab client evaluation jobs across DROID, UR5e, X5, and other RoboLab robot backends, including remote client access, historical launch-argument consistency, asset/render failure monitoring, and clean continuation of interrupted atomic_pick or atomic_pnp batches. Use when the user asks to start a Cosmos3 action policy server for RoboLab, run or resume RoboLab tasks over SSH, audit prior launch logs, preserve output directories, choose the right robot-specific RoboLab runner, or explain/choose evaluation arguments such as --video-mode, --num-runs, --headless, --livestream, remote host/port, seed, and output folder.
 ---
 
 # Cosmos3 RoboLab Server Client
@@ -54,6 +54,19 @@ curl http://<server-ip>:8000/healthz
 
 Use the server IP that is reachable from the RoboLab client, not `127.0.0.1`.
 
+## Client Runner Selection
+
+Choose the client runner by robot backend before composing the command. Do not assume `policies/cosmos3/run.py` works for every robot.
+
+| Robot/backend | Client runner | Notes |
+| --- | --- | --- |
+| DROID/default | `policies/cosmos3/run.py` | Uses DROID joint-position registrations and the base `Cosmos3Client`. |
+| UR5e | `policies/cosmos3/run_ur5.py` | Uses UR5e joint-position registrations and `Cosmos3UR5Client`, which pads UR5 6D joint state into the DROID-shaped server schema and truncates returned actions back to 6D. |
+| ARX X5 | `policies/cosmos3/run_x5.py` | Uses X5 joint-position registrations and the base `Cosmos3Client` with X5 camera presets. |
+| Unknown/new robot | Inspect `policies/cosmos3/run_<robot>.py` and its registration import on the client before launching. Preserve the user-provided runner if they already supplied one. |
+
+For explicit task files, prefer full client-side task paths such as `robolab/tasks/atomic_pnp/banana_in_bowl_task.py` over a bare filename. This avoids ambiguity between `atomic_pnp`, `benchmark`, and other task roots and ensures registration happens before the policy client is constructed.
+
 ## Client Command Template
 
 Run each RoboLab task from `/root/code/RoboLab` on the client:
@@ -71,6 +84,21 @@ Run each RoboLab task from `/root/code/RoboLab` on the client:
 ```
 
 For atomic pick tasks, use `robolab/tasks/atomic_pick/<task>.py`; for pick-and-place tasks, use `robolab/tasks/atomic_pnp/<task>.py`.
+
+UR5e single-task smoke command verified on 2026-07-04:
+
+```bash
+TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
+  --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py \
+  --num-envs 1 \
+  --num-runs 1 \
+  --video-mode all \
+  --headless \
+  --remote-host <server-ip> \
+  --remote-port 8000
+```
+
+Use `--video-mode all` when video capture is desired; this writes mp4 files under `/root/code/RoboLab/output/<run>/...`. Use `--video-mode none` only when the user explicitly requests no videos. Add `--livestream 2` only when the user explicitly requests livestreaming; omit it for ordinary headless recording runs.
 
 For a full `atomic_pick` + `atomic_pnp` sweep with baseline, contact-pose randomization, and lighting randomization, prefer a batch helper that writes `manifest.tsv` and `batch_status.tsv` and runs each row as `--num-runs 1`:
 
@@ -90,6 +118,7 @@ The helper should generate 3 conditions per task: `baseline`, `pose_xy40_yawpi2`
 | `--remote-port` | Policy server websocket/HTTP port. | Usually `8000`; keep historical value if different. |
 | `--headless` | Run Isaac Sim without GUI. | Keep for server/client batch runs. It is compatible with video capture. |
 | `--video-mode` | Video save policy in RoboLab runner. | Use `all` by default. `none` disables mp4 output because runner sets `save_videos = args.video_mode != "none"`. Only use `none` after explicit user approval. |
+| `--livestream` | IsaacLab livestream mode. | Do not add by default. It is independent from video recording; `--video-mode all` records mp4s without livestream. |
 | `--num-runs` | Number of episodes per task/trial. | Experiment-specific. Do not infer from unrelated runs; use user/historical value or ask. |
 | `--output-folder-name` | Output folder relative to RoboLab output root. | Keep the same run root when resuming. Do not switch roots unless requested. |
 | `--randomize-contact-pose` and offsets | Trial perturbation flags. | Preserve exact values from manifest/history using structured parsing such as `shlex.split`. |
