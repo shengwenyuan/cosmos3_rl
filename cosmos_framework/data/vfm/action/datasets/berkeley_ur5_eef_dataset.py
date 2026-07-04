@@ -4,16 +4,13 @@
 """Berkeley AUTOLab UR5 LeRobot dataset for EEF-space action post-training.
 
 Case A is intentionally separate from the RoboMIND UR joint-space reader. The
-Berkeley LeRobot conversion exposes a generic 7D ``action`` vector, expected to
-be ``[dx, dy, dz, droll, dpitch, dyaw, gripper]``. This adapter converts only the
-native delta-RPY rotation representation to the Cosmos action ``rot6d`` representation and
-emits a 10D EEF action vector::
+Berkeley LeRobot conversion exposes a generic 7D EEF command vector
+``[dx, dy, dz, droll, dpitch, dyaw, gripper]``. This adapter converts the native
+delta-RPY rotation representation to the Cosmos action ``rot6d`` representation
+and emits a 10D EEF action vector::
 
     [pos_delta(3), rot6d_delta(6), gripper(1)]
 
-It does not infer robot kinematics, canonicalize an unknown source frame, or
-perform RoboLab deployment conversion. The EEF frame convention must be validated
-against FK-derived UR5 poses before long training runs.
 """
 
 from __future__ import annotations

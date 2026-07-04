@@ -8,10 +8,6 @@
 #
 #   examples/launch_sft_action_policy_berkeley_ur5_eef.sh
 #
-# Cost guard: Berkeley EEF frame canonicalization has not been FK-validated yet.
-# Set ALLOW_UNVERIFIED_EEF=1 only when intentionally running with the current
-# provisional [dx,dy,dz,droll,dpitch,dyaw,gripper] mapping.
-
 set -Eeuo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/root/code/cosmos-framework}"
@@ -35,7 +31,6 @@ TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_berkeley_ur5_eef_
 WANDB_MODE="${WANDB_MODE:-online}"
 FIX_WANDB_CORE="${FIX_WANDB_CORE:-1}"
 ALLOW_WANDB_MISSING="${ALLOW_WANDB_MISSING:-0}"
-ALLOW_UNVERIFIED_EEF="${ALLOW_UNVERIFIED_EEF:-0}"
 RUN_DRYRUN_FIRST="${RUN_DRYRUN_FIRST:-1}"
 TOPOLOGY_CHECK_ONLY="${TOPOLOGY_CHECK_ONLY:-0}"
 PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
@@ -602,10 +597,6 @@ main() {
 
   log "Starting Volcengine Berkeley UR5 EEF orchestration."
   log_platform_env_summary
-  if [[ "$ALLOW_UNVERIFIED_EEF" != "1" ]]; then
-    die "Berkeley EEF frame is still provisional; set ALLOW_UNVERIFIED_EEF=1 to acknowledge and launch."
-  fi
-
   validate_paths
   validate_dataset_metadata
   validate_hardware

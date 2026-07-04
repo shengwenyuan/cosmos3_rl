@@ -116,7 +116,7 @@ examples/toml/sft_config/action_policy_berkeley_ur5_eef_repro.toml
 examples/launch_sft_action_policy_berkeley_ur5_eef.sh
 ```
 
-That path converts Berkeley `action[7]` delta-RPY into a 10D EEF delta action. It must be validated with FK plots and requires an EEF-to-joint IK deployment bridge before RoboLab evaluation.
+That path converts Berkeley `action[7]` delta-RPY into a 10D EEF delta action. Local Berkeley EEF validation passes under `tmps/berkeley_eef_validation/summary.md`; RoboLab evaluation still requires the EEF-to-joint IK deployment bridge.
 
 ## Code Pointers
 
