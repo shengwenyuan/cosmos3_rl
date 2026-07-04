@@ -37,6 +37,9 @@ FIX_WANDB_CORE="${FIX_WANDB_CORE:-1}"
 ALLOW_WANDB_MISSING="${ALLOW_WANDB_MISSING:-0}"
 ALLOW_UNVERIFIED_EEF="${ALLOW_UNVERIFIED_EEF:-0}"
 RUN_DRYRUN_FIRST="${RUN_DRYRUN_FIRST:-1}"
+TOPOLOGY_CHECK_ONLY="${TOPOLOGY_CHECK_ONLY:-0}"
+PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
+DRYRUN_ONLY="${DRYRUN_ONLY:-0}"
 
 DP_SHARD="${DP_SHARD:-8}"
 RECOMMENDED_WORLD_SIZE="${RECOMMENDED_WORLD_SIZE:-64}"
@@ -46,11 +49,16 @@ STRICT_RECOMMENDED_WORLD_SIZE="${STRICT_RECOMMENDED_WORLD_SIZE:-0}"
 MAX_ITER="${MAX_ITER:-3000}"
 SAVE_ITER="${SAVE_ITER:-500}"
 LOGGING_ITER="${LOGGING_ITER:-50}"
-MAX_SAMPLES_PER_BATCH="${MAX_SAMPLES_PER_BATCH:-128}"
+MAX_SAMPLES_PER_BATCH="${MAX_SAMPLES_PER_BATCH:-auto}"
+ALLOW_RISKY_BATCH="${ALLOW_RISKY_BATCH:-0}"
+EXPECTED_GPU_NAME_SUBSTR="${EXPECTED_GPU_NAME_SUBSTR:-H20}"
+MIN_GPU_MEMORY_GB="${MIN_GPU_MEMORY_GB:-90}"
 MASTER_PORT="${MASTER_PORT:-50012}"
 TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}"
 PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+USE_CUDA_COMPAT="${USE_CUDA_COMPAT:-auto}"
+CUDA_COMPAT_PATH="${CUDA_COMPAT_PATH:-}"
 
 USER_EXTRA_TAIL_OVERRIDES="${EXTRA_TAIL_OVERRIDES:-}"
 
@@ -70,7 +78,9 @@ on_error() {
     nvidia-smi || true
   fi
   log "Orchestration log: ${ORCH_LOG:-unset}"
+  log "MLP orchestration log: ${MLP_ORCH_LOG:-unset}"
   log "Training log, if launched: ${OUTPUT_ROOT}/logs/${LOG_FILENAME}"
+  log "MLP training log, if launched: ${MLP_TRAIN_LOG:-unset}"
   exit "$exit_code"
 }
 trap on_error ERR
@@ -85,6 +95,141 @@ require_dir() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+cuda_driver_branch() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+    | head -n 1 \
+    | cut -d. -f1
+}
+
+cuda_compat_libdir_from_root() {
+  local root="$1"
+  if [[ -f "$root/libcuda.so.1" || -f "$root/libcuda.so" ]]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [[ -f "$root/lib/libcuda.so.1" || -f "$root/lib/libcuda.so" ]]; then
+    printf '%s\n' "$root/lib"
+    return 0
+  fi
+  if [[ -f "$root/lib.real/libcuda.so.1" || -f "$root/lib.real/libcuda.so" ]]; then
+    printf '%s\n' "$root/lib.real"
+    return 0
+  fi
+  return 1
+}
+
+find_cuda_compat_libdir() {
+  local candidate
+  if [[ -n "$CUDA_COMPAT_PATH" ]]; then
+    cuda_compat_libdir_from_root "$CUDA_COMPAT_PATH"
+    return
+  fi
+  for candidate in \
+    /usr/local/cuda-13.0/compat \
+    /usr/local/cuda-13/compat \
+    /usr/local/cuda/compat; do
+    [[ -e "$candidate" ]] || continue
+    if cuda_compat_libdir_from_root "$candidate"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+configure_cuda_compat() {
+  export LD_LIBRARY_PATH=
+  export CUDA_COMPAT_ACTIVE=0
+  export CUDA_COMPAT_LIBDIR=
+
+  case "$USE_CUDA_COMPAT" in
+    0|false|False|FALSE|off|OFF|disabled|DISABLED)
+      log "CUDA forward-compat disabled by USE_CUDA_COMPAT=$USE_CUDA_COMPAT."
+      return 0
+      ;;
+  esac
+
+  local enable_compat=0
+  local driver_branch=""
+  driver_branch="$(cuda_driver_branch || true)"
+
+  case "$USE_CUDA_COMPAT" in
+    1|true|True|TRUE|required|REQUIRED)
+      enable_compat=1
+      ;;
+    auto|AUTO)
+      if [[ "$driver_branch" =~ ^[0-9]+$ && "$driver_branch" -lt 580 ]]; then
+        enable_compat=1
+      fi
+      ;;
+    *)
+      die "invalid USE_CUDA_COMPAT=$USE_CUDA_COMPAT; expected auto|required|1|0"
+      ;;
+  esac
+
+  if (( ! enable_compat )); then
+    log "CUDA forward-compat not enabled; driver_branch=${driver_branch:-unknown}, USE_CUDA_COMPAT=$USE_CUDA_COMPAT."
+    return 0
+  fi
+
+  local compat_libdir
+  if ! compat_libdir="$(find_cuda_compat_libdir)"; then
+    if [[ "$USE_CUDA_COMPAT" == "auto" || "$USE_CUDA_COMPAT" == "AUTO" ]]; then
+      log "WARNING: CUDA forward-compat requested by driver_branch=${driver_branch:-unknown}, but no compat libcuda was found."
+      return 0
+    fi
+    die "CUDA forward-compat required, but no compat libcuda found; set CUDA_COMPAT_PATH or install cuda-compat-13-0"
+  fi
+
+  export CUDA_COMPAT_ACTIVE=1
+  export CUDA_COMPAT_LIBDIR="$compat_libdir"
+  export LD_LIBRARY_PATH="$compat_libdir"
+  log "CUDA forward-compat enabled: driver_branch=${driver_branch:-unknown}, libdir=$CUDA_COMPAT_LIBDIR"
+}
+
+is_placeholder_value() {
+  local value="$1"
+  [[ "$value" == *"<"* || "$value" == *">"* || "$value" == "TODO"* || "$value" == "todo"* || "$value" == "changeme"* ]]
+}
+
+reject_placeholder_var() {
+  local name="$1"
+  local value="${!name-}"
+  if [[ -n "$value" ]] && is_placeholder_value "$value"; then
+    die "$name still looks like a UI placeholder: $value"
+  fi
+}
+
+validate_static_env_values() {
+  local name
+  for name in JOB_NAME NPROC_PER_NODE NNODES NODE_RANK MASTER_ADDR MASTER_PORT DATASET_PATH BERKELEY_UR5_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH; do
+    reject_placeholder_var "$name"
+  done
+}
+
+log_env_var() {
+  local name="$1"
+  local value="${!name-<unset>}"
+  log "  $name=$value"
+}
+
+log_platform_env_summary() {
+  log "Platform/distributed env summary:"
+  local name
+  local names=(
+    CUDA_VISIBLE_DEVICES
+    MLP_WORKER_NUM MLP_ROLE_INDEX MLP_TASK_INDEX MLP_WORKER_0_HOST MLP_WORKER_HOSTS MLP_LOG_PATH
+    VC_WORKER_NUM VC_TASK_INDEX VC_WORKER_HOSTS
+    NNODES NPROC_PER_NODE NODE_RANK MASTER_ADDR MASTER_PORT
+    WORLD_SIZE DP_SHARD DP_REPLICATE
+    JOB_NAME WANDB_MODE RUN_DRYRUN_FIRST PREFLIGHT_ONLY DRYRUN_ONLY TOPOLOGY_CHECK_ONLY
+    USE_CUDA_COMPAT CUDA_COMPAT_ACTIVE CUDA_COMPAT_LIBDIR CUDA_COMPAT_PATH LD_LIBRARY_PATH
+  )
+  for name in "${names[@]}"; do
+    log_env_var "$name"
+  done
 }
 
 source_env_file() {
@@ -120,7 +265,7 @@ source_env() {
     source_env_file "$BOOTSTRAP_DIR/cosmos3-train-env.sh"
   fi
 
-  export LD_LIBRARY_PATH=
+  configure_cuda_compat
   export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC PYTORCH_ALLOC_CONF NCCL_DEBUG
 }
 
@@ -130,6 +275,9 @@ activate_repo_env() {
   require_file ".venv/bin/activate"
   # shellcheck disable=SC1091
   source ".venv/bin/activate"
+  hash -r
+  PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+  export PYTHON_BIN
   export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 }
 
@@ -149,6 +297,7 @@ PY_DETECT_GPU
 }
 
 resolve_topology() {
+  validate_static_env_values
   NPROC_PER_NODE="$(detect_nproc_per_node)"
   [[ "$NPROC_PER_NODE" =~ ^[0-9]+$ ]] || die "invalid NPROC_PER_NODE=$NPROC_PER_NODE"
   (( NPROC_PER_NODE > 0 )) || die "NPROC_PER_NODE must be > 0"
@@ -182,15 +331,38 @@ resolve_topology() {
   DP_REPLICATE="${DP_REPLICATE:-$((WORLD_SIZE / DP_SHARD))}"
   (( DP_SHARD * DP_REPLICATE == WORLD_SIZE )) || die "DP_SHARD * DP_REPLICATE must equal WORLD_SIZE"
 
-  export NPROC_PER_NODE NNODES NODE_RANK MASTER_PORT WORLD_SIZE DP_REPLICATE
-  [[ -n "${MASTER_ADDR:-}" ]] && export MASTER_ADDR
+  if [[ "$MAX_SAMPLES_PER_BATCH" == "auto" ]]; then
+    if (( WORLD_SIZE <= 8 )); then
+      MAX_SAMPLES_PER_BATCH=8
+    else
+      MAX_SAMPLES_PER_BATCH=128
+    fi
+  fi
+  [[ "$MAX_SAMPLES_PER_BATCH" =~ ^[0-9]+$ ]] || die "invalid MAX_SAMPLES_PER_BATCH=$MAX_SAMPLES_PER_BATCH"
+  if (( WORLD_SIZE <= 8 && MAX_SAMPLES_PER_BATCH > 16 )); then
+    [[ "$ALLOW_RISKY_BATCH" == "1" ]] || die "MAX_SAMPLES_PER_BATCH=$MAX_SAMPLES_PER_BATCH is risky for WORLD_SIZE=$WORLD_SIZE; use <=16 or set ALLOW_RISKY_BATCH=1"
+  fi
+
+  export NPROC_PER_NODE NNODES NODE_RANK MASTER_PORT WORLD_SIZE DP_REPLICATE MAX_SAMPLES_PER_BATCH
+  if [[ -n "${MASTER_ADDR:-}" ]]; then
+    export MASTER_ADDR
+  fi
 }
 
 setup_logging() {
   mkdir -p "$OUTPUT_ROOT/orchestrator_logs"
   ORCH_LOG="$OUTPUT_ROOT/orchestrator_logs/${JOB_NAME}.node${NODE_RANK:-0}.$(hostname).log"
   export ORCH_LOG
-  exec > >(tee -a "$ORCH_LOG") 2>&1
+  MLP_ORCH_LOG=
+  if [[ -n "${MLP_LOG_PATH:-}" ]]; then
+    mkdir -p "$MLP_LOG_PATH"
+    MLP_ORCH_LOG="$MLP_LOG_PATH/${JOB_NAME}.node${NODE_RANK:-0}.orchestrator.log"
+    export MLP_ORCH_LOG
+    exec > >(tee -a "$ORCH_LOG" "$MLP_ORCH_LOG") 2>&1
+  else
+    export MLP_ORCH_LOG
+    exec > >(tee -a "$ORCH_LOG") 2>&1
+  fi
 }
 
 validate_paths() {
@@ -250,16 +422,41 @@ validate_hardware() {
   require_cmd nvidia-smi
   require_cmd python
   nvidia-smi
-  python - <<'PY_HARDWARE'
+  EXPECTED_GPU_NAME_SUBSTR="$EXPECTED_GPU_NAME_SUBSTR" MIN_GPU_MEMORY_GB="$MIN_GPU_MEMORY_GB" python - <<'PY_HARDWARE'
+import ctypes
+import os
+
+print("python", os.sys.executable)
+print("CUDA_COMPAT_ACTIVE", os.environ.get("CUDA_COMPAT_ACTIVE", ""))
+print("CUDA_COMPAT_LIBDIR", os.environ.get("CUDA_COMPAT_LIBDIR", ""))
+print("LD_LIBRARY_PATH", os.environ.get("LD_LIBRARY_PATH", ""))
+try:
+    libcuda = ctypes.CDLL("libcuda.so.1")
+    driver_version = ctypes.c_int()
+    result = libcuda.cuDriverGetVersion(ctypes.byref(driver_version))
+    print("cuDriverGetVersion_result", result)
+    print("cuDriverGetVersion", driver_version.value)
+except OSError as exc:
+    print("libcuda_load_error", exc)
+
 import torch
+
+expected_name = os.environ.get("EXPECTED_GPU_NAME_SUBSTR", "")
+min_mem_gb = float(os.environ.get("MIN_GPU_MEMORY_GB", "0"))
 print("torch", torch.__version__)
+print("torch_cuda", torch.version.cuda)
 print("cuda_available", torch.cuda.is_available())
 print("cuda_device_count", torch.cuda.device_count())
-for i in range(torch.cuda.device_count()):
-    props = torch.cuda.get_device_properties(i)
-    print(f"gpu[{i}] {props.name} mem_gb={props.total_memory / 1024**3:.1f}")
 if not torch.cuda.is_available():
     raise SystemExit("CUDA is not available")
+for i in range(torch.cuda.device_count()):
+    props = torch.cuda.get_device_properties(i)
+    mem_gb = props.total_memory / 1024**3
+    print(f"gpu[{i}] {props.name} mem_gb={mem_gb:.1f}")
+    if expected_name and expected_name not in props.name:
+        raise SystemExit(f"gpu[{i}] name {props.name!r} does not contain expected substring {expected_name!r}")
+    if mem_gb < min_mem_gb:
+        raise SystemExit(f"gpu[{i}] memory {mem_gb:.1f}GB < required {min_mem_gb:.1f}GB")
 PY_HARDWARE
   local local_gpu_count
   local_gpu_count="$(nvidia-smi -L | wc -l | tr -d ' ')"
@@ -309,7 +506,20 @@ write_job_metadata() {
   mkdir -p "$meta_dir"
   env | sort > "$meta_dir/env.node${NODE_RANK}.$(hostname).txt"
   git status --short > "$meta_dir/git_status.node${NODE_RANK}.$(hostname).txt" || true
+  git rev-parse HEAD > "$meta_dir/git_head.node${NODE_RANK}.$(hostname).txt" || true
   nvidia-smi -q > "$meta_dir/nvidia_smi.node${NODE_RANK}.$(hostname).txt" || true
+}
+
+log_effective_plan() {
+  log "Effective launch plan:"
+  log "  JOB_NAME=$JOB_NAME"
+  log "  WORLD_SIZE=$WORLD_SIZE NNODES=$NNODES NODE_RANK=$NODE_RANK NPROC_PER_NODE=$NPROC_PER_NODE MASTER_ADDR=${MASTER_ADDR:-<unset>} MASTER_PORT=$MASTER_PORT"
+  log "  DP_SHARD=$DP_SHARD DP_REPLICATE=$DP_REPLICATE MAX_SAMPLES_PER_BATCH=$MAX_SAMPLES_PER_BATCH"
+  log "  DATASET_PATH=$DATASET_PATH"
+  log "  BASE_CHECKPOINT_PATH=$BASE_CHECKPOINT_PATH"
+  log "  WAN_VAE_PATH=$WAN_VAE_PATH"
+  log "  OUTPUT_ROOT=$OUTPUT_ROOT"
+  log "  EXTRA_TAIL_OVERRIDES=$EXTRA_TAIL_OVERRIDES"
 }
 
 build_tail_overrides() {
@@ -342,7 +552,10 @@ build_tail_overrides() {
 }
 
 run_dryrun() {
-  [[ "$RUN_DRYRUN_FIRST" == "1" ]] || return
+  if [[ "$RUN_DRYRUN_FIRST" != "1" ]]; then
+    log "Skipping direct config dryrun because RUN_DRYRUN_FIRST=$RUN_DRYRUN_FIRST."
+    return 0
+  fi
   log "Running direct config dryrun before torchrun."
   IMAGINAIRE_OUTPUT_ROOT="$OUTPUT_ROOT/dryrun_${JOB_NAME}" \
   BERKELEY_UR5_ROOT="$BERKELEY_UR5_ROOT" \
@@ -357,6 +570,13 @@ run_dryrun() {
 launch_training() {
   export DATASET_PATH BERKELEY_UR5_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH
   export OUTPUT_ROOT IMAGINAIRE_OUTPUT_ROOT LOG_FILENAME
+  if [[ -n "${MLP_LOG_PATH:-}" ]]; then
+    mkdir -p "$MLP_LOG_PATH"
+    MLP_TRAIN_LOG="$MLP_LOG_PATH/$LOG_FILENAME"
+  else
+    MLP_TRAIN_LOG=
+  fi
+  export MLP_TRAIN_LOG
   log "Launching Berkeley UR5 EEF SFT."
   log "JOB_NAME=$JOB_NAME"
   log "WORLD_SIZE=$WORLD_SIZE NNODES=$NNODES NODE_RANK=$NODE_RANK NPROC_PER_NODE=$NPROC_PER_NODE"
@@ -364,6 +584,7 @@ launch_training() {
   log "DATASET_PATH=$DATASET_PATH"
   log "BASE_CHECKPOINT_PATH=$BASE_CHECKPOINT_PATH"
   log "OUTPUT_ROOT=$OUTPUT_ROOT"
+  log "MLP_TRAIN_LOG=${MLP_TRAIN_LOG:-<unset>}"
   log "EXTRA_TAIL_OVERRIDES=$EXTRA_TAIL_OVERRIDES"
   bash examples/launch_sft_action_policy_berkeley_ur5_eef.sh
 }
@@ -372,9 +593,15 @@ main() {
   source_env
   activate_repo_env
   resolve_topology
+  if [[ "$TOPOLOGY_CHECK_ONLY" == "1" ]]; then
+    log_platform_env_summary
+    log "Topology check passed."
+    return 0
+  fi
   setup_logging
 
   log "Starting Volcengine Berkeley UR5 EEF orchestration."
+  log_platform_env_summary
   if [[ "$ALLOW_UNVERIFIED_EEF" != "1" ]]; then
     die "Berkeley EEF frame is still provisional; set ALLOW_UNVERIFIED_EEF=1 to acknowledge and launch."
   fi
@@ -385,7 +612,16 @@ main() {
   validate_wandb
   write_job_metadata
   build_tail_overrides
+  log_effective_plan
+  if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
+    log "Preflight checks passed; exiting before dryrun/training because PREFLIGHT_ONLY=1."
+    return 0
+  fi
   run_dryrun
+  if [[ "$DRYRUN_ONLY" == "1" ]]; then
+    log "Dryrun passed; exiting before torchrun because DRYRUN_ONLY=1."
+    return 0
+  fi
   launch_training
 
   local run_dir="$OUTPUT_ROOT/cosmos3_action/action_sft/$JOB_NAME"

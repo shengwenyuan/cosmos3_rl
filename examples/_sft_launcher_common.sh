@@ -24,6 +24,8 @@
 #   NODE_RANK            torchrun --node_rank; this worker's 0-based index.
 #   MASTER_ADDR          torchrun --master_addr; rank-0 host (multi-node only — it
 #                        has no torchrun env fallback, so it must be passed here).
+#   PYTHON_BIN           Python interpreter for distributed launch; default resolves
+#                        from PATH after the caller activates its environment.
 #   LOG_FILENAME         override $LOG_DIR/${LOG_FILENAME}
 #                        (default <toml-stem>_sft.log).
 #
@@ -58,8 +60,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$WORKDIR/outputs/train}"
 LOG_DIR="$OUTPUT_ROOT/logs"
 TOML_STEM="$(basename "$TOML_FILE" .toml)"
 LOG_FILE="$LOG_DIR/${LOG_FILENAME:-${TOML_STEM}_sft.log}"
+MLP_TRAIN_LOG="${MLP_TRAIN_LOG:-}"
 IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 mkdir -p "$LOG_DIR"
+if [[ -n "$MLP_TRAIN_LOG" ]]; then
+    mkdir -p "$(dirname "$MLP_TRAIN_LOG")"
+fi
 
 echo ">>> $(date '+%H:%M:%S') Checking inputs..."
 [[ -f "$TOML_FILE" ]] || { echo "ERROR: TOML not found: $TOML_FILE" >&2; exit 1; }
@@ -78,6 +84,10 @@ echo ">>> $(date '+%H:%M:%S') TOML:       $TOML_FILE"
 [[ -n "${DATASET_PATH:-}" ]]         && echo ">>> $(date '+%H:%M:%S') dataset:    $DATASET_PATH"
 [[ -n "${BASE_CHECKPOINT_PATH:-}" ]] && echo ">>> $(date '+%H:%M:%S') checkpoint: $BASE_CHECKPOINT_PATH"
 echo ">>> $(date '+%H:%M:%S') log:        $LOG_FILE"
+[[ -n "$MLP_TRAIN_LOG" ]] && echo ">>> $(date '+%H:%M:%S') mlp log:    $MLP_TRAIN_LOG"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
+export PYTHON_BIN
+echo ">>> $(date '+%H:%M:%S') python:     $PYTHON_BIN"
 
 # Default empty if caller didn't set; safe under set -u.
 [[ ${TAIL_OVERRIDES+x} ]] || TAIL_OVERRIDES=()
@@ -95,11 +105,16 @@ TORCHRUN_ARGS=(--nproc_per_node="${NPROC_PER_NODE:-8}" --master_port="${MASTER_P
 [[ -n "${NODE_RANK:-}" ]]   && TORCHRUN_ARGS+=(--node_rank="$NODE_RANK")
 [[ -n "${MASTER_ADDR:-}" ]] && TORCHRUN_ARGS+=(--master_addr="$MASTER_ADDR")
 
+TEE_TARGETS=("$LOG_FILE")
+if [[ -n "$MLP_TRAIN_LOG" ]]; then
+    TEE_TARGETS+=("$MLP_TRAIN_LOG")
+fi
+
 IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
-    torchrun "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
+    "$PYTHON_BIN" -m torch.distributed.run "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
     --sft-toml="$TOML_FILE" \
     "${TRAILING_ARGS[@]}" \
-    2>&1 | tee "$LOG_FILE"
+    2>&1 | tee "${TEE_TARGETS[@]}"
 
 EXIT_CODE=${PIPESTATUS[0]}
 echo ">>> $(date '+%H:%M:%S') Done (exit $EXIT_CODE)"

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -47,6 +48,7 @@ _DEPTH_VIEW = "observation.images.image_with_depth"
 _IMAGE_PREFERENCE: tuple[str, ...] = (_EXTERNAL_VIEW, _WRIST_VIEW, _DEPTH_VIEW)
 _NATIVE_ACTION_DIM = 7
 _EEF_ACTION_DIM = 10
+_INVALID_FRAME_RE = re.compile(r"Invalid frame index=\d+.*must be less than (\d+)")
 
 
 def _strided_window_counts(ep_counts: np.ndarray, chunk_length: int, sample_stride: int) -> np.ndarray:
@@ -197,10 +199,9 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
     def _load_concat_video(self, episode: dict[str, Any], observation_rows: list[dict[str, Any]]) -> torch.Tensor:
         timestamps = [float(row["timestamp"]) for row in observation_rows]
         frames = [
-            decode_video_frames(
+            self._decode_video_frames_safe(
                 self._video_path(episode, feat),
                 [float(episode.get(f"videos/{feat}/from_timestamp", 0.0)) + ts for ts in timestamps],
-                self._tolerance_s,
             )
             for feat in self._canvas_features
         ]
@@ -208,6 +209,22 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
         left = frames[1] if len(frames) > 1 else zero_like_view(top)
         right = zero_like_view(top)
         return concat_three_view_canvas(top, left, right)
+
+    def _decode_video_frames_safe(self, video_path: Path, timestamps: list[float]) -> torch.Tensor:
+        try:
+            return decode_video_frames(video_path, timestamps, self._tolerance_s)
+        except IndexError as exc:
+            match = _INVALID_FRAME_RE.search(str(exc))
+            if match is None:
+                raise
+            num_frames = int(match.group(1))
+            if num_frames <= 0:
+                raise
+            max_timestamp = (num_frames - 1) / self._fps
+            clamped = [min(float(ts), max_timestamp) for ts in timestamps]
+            if all(abs(float(a) - float(b)) < 1e-12 for a, b in zip(clamped, timestamps, strict=True)):
+                raise
+            return decode_video_frames(video_path, clamped, self._tolerance_s)
 
     def __len__(self) -> int:
         return int(self._valid_cum[-1]) if self._valid_cum.size else 0
