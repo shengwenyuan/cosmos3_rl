@@ -1,8 +1,10 @@
 # Berkeley UR5 EEF Retraining TODO
 
-This note captures the remaining known fixes before the next full Berkeley UR5
-EEF training run. It intentionally leaves these items out of scope for the next
-round:
+This note captures the Berkeley UR5 EEF fixes and validation items before the
+next full training run. Items 1, 4, and 5 have code-level fixes in place; keep the
+validation checks below before treating a new checkpoint as production-ready.
+
+The following items remain intentionally out of scope for the next round:
 
 - Wrist camera registration is considered usable for now, even though strict
   Berkeley hand-camera alignment remains a future improvement.
@@ -14,28 +16,26 @@ round:
 
 ## 1. Align The Image Canvas With DROID
 
-Current Berkeley SFT data uses `top=external`, `bottom-left=wrist`, and
-`bottom-right=zero`. DROID-style concat-view policies use `top=wrist` and
-bottom external views. The next Berkeley full run should switch Berkeley UR5 EEF
-to the DROID-style visual contract:
+Berkeley SFT now follows the DROID-style concat-view contract:
+`top=wrist`, `bottom-left=external`, and `bottom-right=zero`. Keep the explicit
+validation checks below before launching the next Berkeley full run:
 
 - Training adapter:
-  - Update `cosmos_framework/data/vfm/action/datasets/berkeley_ur5_eef_dataset.py`
-    so `_load_concat_video()` produces `top=wrist`, `bottom-left=external`, and
-    `bottom-right=zero`.
-  - Update the class docstring and `additional_view_description` text in the
-    same file.
-  - Prefer configuring `canvas_views=("observation.images.hand_image",
-    "observation.images.image")` in
-    `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_berkeley_ur5_eef_nano.py`
-    once the adapter order is updated and validated.
+  - `cosmos_framework/data/vfm/action/datasets/berkeley_ur5_eef_dataset.py`
+    resolves `canvas_views` as wrist first, external second, then zero-fills the
+    bottom-right quadrant.
+  - The class docstring and `additional_view_description` describe the same
+    view order.
+  - `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_berkeley_ur5_eef_nano.py`
+    configures `canvas_views=("observation.images.hand_image",
+    "observation.images.image")`.
 - Server:
-  - Update `_CONCAT_VIEW_DESCRIPTION` in
-    `cosmos_framework/scripts/action_policy_server_robolab_div.py` to describe
+  - `_CONCAT_VIEW_DESCRIPTION` in
+    `cosmos_framework/scripts/action_policy_server_robolab_div.py` now describes
     `top=wrist`, `bottom-left=external`, `bottom-right=zero`.
 - Client:
-  - Update `Cosmos3UR5Client._compose_canvas()` in the RoboLab client so the
-    actual request image matches the training canvas.
+  - `Cosmos3UR5Client._compose_canvas()` in the RoboLab client must use the same
+    request image layout: top wrist, bottom-left external, bottom-right zero.
 - Validation:
   - Save one training sample canvas and one live RoboLab request canvas.
   - Verify both have the same view order, aspect, padding, and prompt text before
@@ -43,23 +43,22 @@ to the DROID-style visual contract:
 
 ## 4. Train On Standard SE(3) Delta Actions
 
-The current Berkeley adapter trains on the native Berkeley command stream:
-`[native_xyz, rot6d(native_rpy), gripper]`. The next full run should instead
-derive the pose action from `observation.state` absolute EEF poses:
+The Berkeley adapter now derives the pose action from `observation.state`
+absolute EEF poses instead of training on the native Berkeley command stream
+`[native_xyz, rot6d(native_rpy), gripper]`:
 
-- Read `observation.state[:3]` as position and `observation.state[3:7]` as
+- `observation.state[:3]` is read as position and `observation.state[3:7]` as
   `quat_xyzw`.
-- Build an absolute pose trajectory for the `chunk_length + 1` observation rows
-  using `build_abs_pose_from_components(..., "quat_xyzw")`.
-- Build the supervised pose target with
+- The adapter builds an absolute pose trajectory for the `chunk_length + 1`
+  observation rows using `build_abs_pose_from_components(..., "quat_xyzw")`.
+- The supervised pose target is built with
   `pose_abs_to_rel(..., rotation_format="rot6d", pose_convention="backward_framewise")`.
-- Concatenate one gripper channel to keep the model target width at 10D:
+- One native Berkeley action-stream gripper channel, `action[:, 6]`, is
+  concatenated to keep the model target width at 10D:
   `[se3_delta_translation(3), se3_delta_rot6d(6), gripper(1)]`.
-- Decide and document the gripper source explicitly:
-  - If using Berkeley `action[:, 6]`, preserve the current action-stream target
-    convention and deployment mapping.
-  - If using `observation.state[:, 7]`, validate lag and inversion against the
-    client-side gripper command convention before training.
+- If a future run switches gripper supervision to `observation.state[:, 7]`,
+  validate lag and inversion against the client-side command convention before
+  training.
 
 Acceptance checks:
 
@@ -70,13 +69,12 @@ Acceptance checks:
 
 ## 5. Restore Standard Server EEF Decoding
 
-The divided RoboLab server currently contains a temporary Berkeley native-command
-decoder for the existing checkpoint. A checkpoint trained on standard SE(3)
-deltas should use the normal inverse conversion:
+The divided RoboLab server now uses the standard inverse conversion for
+checkpoints trained on SE(3) deltas. Older native-command Berkeley checkpoints
+should not use this path without their temporary decoder:
 
-- Remove or bypass `_temporary_berkeley_native_command_to_abs_eef_pose()` in
-  `cosmos_framework/scripts/action_policy_server_robolab_div.py` for the new
-  checkpoint path.
+- `_temporary_berkeley_native_command_to_abs_eef_pose()` is removed from the new
+  checkpoint path in `cosmos_framework/scripts/action_policy_server_robolab_div.py`.
 - In the `eef_pose` response branch:
   - Build `initial_pose` from the latest `observation/eef_pos` and
     `observation/eef_quat`.
