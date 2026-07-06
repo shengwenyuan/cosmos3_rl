@@ -48,6 +48,7 @@ from cosmos_framework.data.vfm.action.pose_utils import (
     build_abs_pose_from_components,
     convert_rotation,
     pose_abs_to_rel,
+    pose_rel_to_abs,
 )
 from cosmos_framework.data.vfm.action.transforms import ActionTransformPipeline
 from cosmos_framework.data.vfm.joint_dataloader import IterativeJointDataLoader
@@ -249,73 +250,43 @@ def _extract_observation_image(obs: dict[str, Any]) -> np.ndarray:
     raise ValueError("Observation must contain 'observation/image' or RoBoArena wrist/exterior image keys")
 
 
-def _temporary_berkeley_native_command_to_abs_eef_pose(
-    command: np.ndarray,
+def _standard_eef_delta_to_abs_eef_pose(
+    pose_delta: np.ndarray,
     initial_pos: np.ndarray,
     initial_quat_xyzw: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Temporarily decode Berkeley native EEF commands into absolute EEF poses.
+    """Decode standard SE(3) delta actions into absolute EEF poses.
 
-    TEMPORARY DEPLOYMENT FIT:
-    Berkeley SFT targets are native command vectors converted to 10D
-    ``[dx, dy, dz, rot6d(droll, dpitch, dyaw), gripper]``. They are not the
-    standard ``pose_abs_to_rel(..., backward_framewise)`` vectors consumed by
-    ``pose_rel_to_abs``. The coefficients below are copied from
-    ``tmps/berkeley_eef_validation/summary.md`` and should be removed once the
-    deployment frame is calibrated or the checkpoint is trained on canonical SE(3)
-    deltas.
+    The model output is the Cosmos action-manifold representation
+    ``[translation_delta(3), rot6d_delta(6)]`` using the shared
+    ``backward_framewise`` convention. The returned pose sequence drops the
+    initial conditioning pose and aligns one absolute target with each predicted
+    delta row.
     """
 
-    command = np.asarray(command, dtype=np.float32)
-    if command.ndim != 2 or command.shape[-1] != 9:
-        raise ValueError(f"Expected Berkeley native EEF command shape (T, 9), got {command.shape}")
+    pose_delta = np.asarray(pose_delta, dtype=np.float32)
+    if pose_delta.ndim != 2 or pose_delta.shape[-1] != 9:
+        raise ValueError(f"Expected standard EEF pose delta shape (T, 9), got {pose_delta.shape}")
 
-    native_xyz = command[:, :3]
-    native_rpy = np.asarray(convert_rotation(command[:, 3:9], "rot6d", "euler_xyz"), dtype=np.float32)
-
-    # Direct position fit from Berkeley native translation command to observed state delta:
-    #   state_dx ~= +0.6069 * action_dy
-    #   state_dy ~= +0.6158 * action_dx
-    #   state_dz ~= -0.6025 * action_dz
-    delta_pos_world = np.stack(
-        [
-            0.6069 * native_xyz[:, 1],
-            0.6158 * native_xyz[:, 0],
-            -0.6025 * native_xyz[:, 2],
-        ],
-        axis=-1,
-    ).astype(np.float32)
-
-    # Body-relative rotation fit from Berkeley native RPY command to observed EEF delta:
-    #   observed_x ~= +0.6247 * action_dpitch
-    #   observed_y ~= +0.6124 * action_droll
-    #   observed_z ~= +0.6177 * action_dyaw
-    delta_rpy_body = np.stack(
-        [
-            0.6247 * native_rpy[:, 1],
-            0.6124 * native_rpy[:, 0],
-            0.6177 * native_rpy[:, 2],
-        ],
-        axis=-1,
-    ).astype(np.float32)
-    delta_rot_body = np.asarray(convert_rotation(delta_rpy_body, "euler_xyz", "matrix"), dtype=np.float32)
-
-    position = np.asarray(initial_pos, dtype=np.float32).reshape(3).copy()
-    rotation = np.asarray(convert_rotation(initial_quat_xyzw, "quat_xyzw", "matrix"), dtype=np.float32).reshape(3, 3)
-    positions: list[np.ndarray] = []
-    rotations: list[np.ndarray] = []
-    for step in range(command.shape[0]):
-        position = position + delta_pos_world[step]
-        rotation = np.asarray(
-            convert_rotation(rotation @ delta_rot_body[step], "matrix", "matrix"),
-            dtype=np.float32,
-        ).reshape(3, 3)
-        positions.append(position.copy())
-        rotations.append(rotation.copy())
-
-    positions_np = np.stack(positions).astype(np.float32)
-    quat_xyzw = np.asarray(convert_rotation(np.stack(rotations), "matrix", "quat_xyzw"), dtype=np.float32)
-    return positions_np, quat_xyzw
+    initial_pose = build_abs_pose_from_components(
+        np.asarray(initial_pos, dtype=np.float32).reshape(1, 3),
+        np.asarray(initial_quat_xyzw, dtype=np.float32).reshape(1, 4),
+        "quat_xyzw",
+    )[0]
+    poses_abs = pose_rel_to_abs(
+        pose_delta,
+        rotation_format="rot6d",
+        pose_convention="backward_framewise",
+        initial_pose=initial_pose,
+        normalize_rotation=True,
+    )
+    target_poses = poses_abs[1:]
+    positions = np.asarray(target_poses[:, :3, 3], dtype=np.float32)
+    quat_xyzw = np.asarray(
+        convert_rotation(target_poses[:, :3, :3], "matrix", "quat_xyzw", normalize_matrix=True),
+        dtype=np.float32,
+    )
+    return positions, quat_xyzw
 
 
 def _build_data_batch_from_sample(sample: dict[str, Any]) -> dict[str, Any]:
@@ -713,7 +684,7 @@ class RobolabPolicyService:
         if self.cfg.action_space == "eef_pose":
             eef_pos = _ensure_2d_float_array(obs["observation/eef_pos"], "observation/eef_pos", 3)
             eef_quat = _ensure_2d_float_array(obs["observation/eef_quat"], "observation/eef_quat", 4)
-            position, quat_xyzw = _temporary_berkeley_native_command_to_abs_eef_pose(
+            position, quat_xyzw = _standard_eef_delta_to_abs_eef_pose(
                 action_np[:, :9],
                 eef_pos[-1],
                 eef_quat[-1],

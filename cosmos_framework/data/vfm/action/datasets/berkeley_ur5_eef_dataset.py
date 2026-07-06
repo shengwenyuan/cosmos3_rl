@@ -4,12 +4,12 @@
 """Berkeley AUTOLab UR5 LeRobot dataset for EEF-space action post-training.
 
 Case A is intentionally separate from the RoboMIND UR joint-space reader. The
-Berkeley LeRobot conversion exposes a generic 7D EEF command vector
-``[dx, dy, dz, droll, dpitch, dyaw, gripper]``. This adapter converts the native
-delta-RPY rotation representation to the Cosmos action ``rot6d`` representation
-and emits a 10D EEF action vector::
+Berkeley LeRobot conversion exposes EEF absolute pose state and a generic 7D
+EEF command vector. This adapter uses the state pose trajectory to build the
+shared Cosmos SE(3) action representation and keeps the native command gripper
+channel as the scalar target::
 
-    [pos_delta(3), rot6d_delta(6), gripper(1)]
+    [se3_delta_translation(3), se3_delta_rot6d(6), gripper(1)]
 
 """
 
@@ -32,18 +32,20 @@ from cosmos_framework.data.vfm.action.datasets.action_sft_dataset import (
 )
 from cosmos_framework.data.vfm.action.datasets.base_dataset import ActionBaseDataset
 from cosmos_framework.data.vfm.action.datasets.canvas_utils import concat_three_view_canvas, zero_like_view
-from cosmos_framework.data.vfm.action.pose_utils import convert_rotation
+from cosmos_framework.data.vfm.action.pose_utils import build_abs_pose_from_components, pose_abs_to_rel
 from cosmos_framework.data.vfm.action.transforms import ActionTransformPipeline
 
 PoseConvention = Literal["backward_framewise"]
 Viewpoint = Literal["concat_view"]
 
 _ACTION_FEATURE = "action"
+_STATE_FEATURE = "observation.state"
 _EXTERNAL_VIEW = "observation.images.image"
 _WRIST_VIEW = "observation.images.hand_image"
 _DEPTH_VIEW = "observation.images.image_with_depth"
 _IMAGE_PREFERENCE: tuple[str, ...] = (_WRIST_VIEW, _EXTERNAL_VIEW, _DEPTH_VIEW)
 _NATIVE_ACTION_DIM = 7
+_STATE_DIM = 8
 _EEF_ACTION_DIM = 10
 _INVALID_FRAME_RE = re.compile(r"Invalid frame index=\d+.*must be less than (\d+)")
 
@@ -119,6 +121,12 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
                 f"Berkeley UR5 EEF adapter expects `{_ACTION_FEATURE}` width {_NATIVE_ACTION_DIM}, got {width}. "
                 "If this is a joint-space dataset, use the RoboMIND UR joint adapter instead."
             )
+        state_width = _feature_width(self._info, _STATE_FEATURE)
+        if state_width != _STATE_DIM:
+            raise ValueError(
+                f"Berkeley UR5 EEF adapter expects `{_STATE_FEATURE}` width {_STATE_DIM}, got {state_width}. "
+                "The state must be [x, y, z, qx, qy, qz, qw, gripper] to build standard SE(3) deltas."
+            )
         self._canvas_features = self._resolve_canvas(canvas_views)
 
         episode_indices = np.asarray([int(r["episode_index"]) for r in self._rows], dtype=np.int64)
@@ -150,7 +158,7 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
         episode = self._episodes[int(observation_rows[0]["episode_index"])]
 
         video = self._load_concat_video(episode, observation_rows)
-        raw_action = self._build_eef_action(observation_rows[: self._chunk_length])
+        raw_action = self._build_eef_action(observation_rows, observation_rows[: self._chunk_length])
         task = self._tasks[int(observation_rows[0]["task_index"])]
         ai_caption = random.choice([part.strip() for part in task.split(" | ") if part.strip()] or [task])
 
@@ -183,15 +191,34 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
             raise ValueError(f"No Berkeley UR5 observation.images.* cameras found; have {sorted(available)}.")
         return feats[:2]
 
-    def _build_eef_action(self, action_rows: list[dict[str, Any]]) -> torch.Tensor:
+    def _build_eef_action(
+        self,
+        observation_rows: list[dict[str, Any]],
+        action_rows: list[dict[str, Any]],
+    ) -> torch.Tensor:
+        state = np.asarray([_row_vector(row, _STATE_FEATURE) for row in observation_rows], dtype=np.float32)
+        if state.shape[-1] != _STATE_DIM:
+            raise ValueError(f"Expected Berkeley state width {_STATE_DIM}, got {state.shape[-1]}.")
+        if len(observation_rows) != len(action_rows) + 1:
+            raise ValueError(
+                f"Expected one more observation row than action rows, got {len(observation_rows)} and {len(action_rows)}."
+            )
+
+        poses_abs = build_abs_pose_from_components(state[:, :3], state[:, 3:7], "quat_xyzw")
+        poses_rel = pose_abs_to_rel(
+            poses_abs,
+            rotation_format="rot6d",
+            pose_convention=self._pose_convention,
+        )
         native = np.asarray([_row_vector(row, _ACTION_FEATURE) for row in action_rows], dtype=np.float32)
         if native.shape[-1] != _NATIVE_ACTION_DIM:
             raise ValueError(f"Expected Berkeley action width {_NATIVE_ACTION_DIM}, got {native.shape[-1]}.")
-        rot6d = np.asarray(convert_rotation(native[:, 3:6], "euler_xyz", "rot6d"), dtype=np.float32)
+        if poses_rel.shape[0] != native.shape[0]:
+            raise ValueError(f"Pose delta/action length mismatch: {poses_rel.shape[0]} vs {native.shape[0]}.")
         gripper = native[:, 6:7]
         if self._gripper_invert:
             gripper = 1.0 - gripper
-        action = np.concatenate([native[:, :3], rot6d, gripper], axis=-1)
+        action = np.concatenate([poses_rel, gripper], axis=-1)
         return torch.from_numpy(action).float()
 
     def _load_concat_video(self, episode: dict[str, Any], observation_rows: list[dict[str, Any]]) -> torch.Tensor:
