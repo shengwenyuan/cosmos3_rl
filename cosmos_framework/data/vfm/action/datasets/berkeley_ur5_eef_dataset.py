@@ -42,7 +42,7 @@ _ACTION_FEATURE = "action"
 _EXTERNAL_VIEW = "observation.images.image"
 _WRIST_VIEW = "observation.images.hand_image"
 _DEPTH_VIEW = "observation.images.image_with_depth"
-_IMAGE_PREFERENCE: tuple[str, ...] = (_EXTERNAL_VIEW, _WRIST_VIEW, _DEPTH_VIEW)
+_IMAGE_PREFERENCE: tuple[str, ...] = (_WRIST_VIEW, _EXTERNAL_VIEW, _DEPTH_VIEW)
 _NATIVE_ACTION_DIM = 7
 _EEF_ACTION_DIM = 10
 _INVALID_FRAME_RE = re.compile(r"Invalid frame index=\d+.*must be less than (\d+)")
@@ -78,9 +78,9 @@ def _row_vector(row: dict[str, Any], key: str) -> np.ndarray:
 class BerkeleyUR5EEFDataset(ActionBaseDataset):
     """Berkeley AUTOLab UR5 EEF-space dataset.
 
-    The fixed canvas uses the external camera as the top row, the wrist camera as
-    the bottom-left view, and a black zero-padded bottom-right view when the
-    third view is absent.
+    The fixed canvas follows the DROID concat-view layout: wrist camera on top,
+    the external Berkeley camera on the bottom-left, and a black zero-padded
+    bottom-right view when the third view is absent.
     """
 
     def __init__(
@@ -160,8 +160,9 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
             action=raw_action,
             ai_caption=ai_caption,
             additional_view_description=(
-                "The top row is the external Berkeley UR5 camera. "
-                "The bottom-left row is the wrist camera; the bottom-right row is a zero-padded missing view."
+                "The top row is the wrist camera. "
+                "The bottom-left row is the external Berkeley UR5 camera; "
+                "the bottom-right row is a zero-padded missing view."
             ),
         )
 
@@ -170,7 +171,7 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
         if canvas_views is not None:
             feats = [v if v.startswith("observation.images.") else f"observation.images.{v}" for v in canvas_views]
         else:
-            feats = [f for f in (_EXTERNAL_VIEW, _WRIST_VIEW) if f in available]
+            feats = [f for f in (_WRIST_VIEW, _EXTERNAL_VIEW) if f in available]
             if not feats:
                 feats = [f for f in _IMAGE_PREFERENCE if f in available]
             if _EXTERNAL_VIEW in feats and _DEPTH_VIEW in feats:

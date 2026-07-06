@@ -76,11 +76,9 @@ _DEFAULT_GRIPPER_DIM = 1
 _DEFAULT_EEF_POSE_ACTION_DIM = 10
 _DEFAULT_ROBOLAB_OUTPUT_DIR = DEFAULT_FALLBACK_OUTPUT_DIR / "robolab"
 _CONCAT_VIEW_DESCRIPTION = (
-    # "The top row is from the wrist-mounted camera. "
-    # "The bottom row contains two horizontally concatenated third-person perspective views of the scene from opposite "
-    # "sides, with the robot visible."
-    "The top row is the external Berkeley UR5 camera. "
-    "The bottom-left row is the wrist camera; the bottom-right row is a zero-padded missing view."
+    "The top row is the wrist camera. "
+    "The bottom-left row is the external Berkeley UR5 camera; "
+    "the bottom-right row is a zero-padded missing view."
 )
 _DEFAULT_HF_REVISION = "main"
 _ROBOLAB_POLICY_HF_REPOSITORIES = {
