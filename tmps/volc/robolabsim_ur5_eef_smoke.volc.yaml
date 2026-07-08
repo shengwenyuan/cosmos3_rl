@@ -1,0 +1,31 @@
+TaskName: "cosmos3_robolabsim_ur5_eef_smoke"
+Description: "RoboLabSim UR5 EEF smoke from baked image 0.7"
+Entrypoint: "bash /root/code/cosmos-framework/examples/launch_volcengine_robolabsim_ur5_eef_h20.sh"
+ImageUrl: "dexmalhub-cn-beijing.cr.volces.com/default/cosmos3_cu13_base:0.7"
+ResourceQueueID: "q-20260407154816-h6qwg"
+Framework: "Custom"
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 1
+    Flavor: "ml.pni3ln.35xlarge"
+ActiveDeadlineSeconds: 7200
+DelayExitTimeSeconds: 0
+AccessType: "Queue"
+Preemptible: false
+Priority: 4
+Envs:
+  - {Name: "REPO_ROOT", Value: "/root/code/cosmos-framework"}
+  - {Name: "FAST_ROOT", Value: "/mlp_vepfs/share/swy/cosmos3-framework"}
+  - {Name: "SLOW_ROOT", Value: "/dexmal-datainfra-swy"}
+  - {Name: "MLP_LOG_PATH", Value: "/root/logs"}
+  - {Name: "NNODES", Value: "1"}
+  - {Name: "NPROC_PER_NODE", Value: "8"}
+  - {Name: "NODE_RANK", Value: "0"}
+  - {Name: "DP_SHARD", Value: "8"}
+  - {Name: "MAX_ITER", Value: "60"}
+  - {Name: "SAVE_ITER", Value: "60"}
+  - {Name: "LOGGING_ITER", Value: "10"}
+  - {Name: "MAX_SAMPLES_PER_BATCH", Value: "4"}
+  - {Name: "RUN_DRYRUN_FIRST", Value: "1"}
+  - {Name: "WANDB_MODE", Value: "online"}
+  - {Name: "USE_CUDA_COMPAT", Value: "auto"}
