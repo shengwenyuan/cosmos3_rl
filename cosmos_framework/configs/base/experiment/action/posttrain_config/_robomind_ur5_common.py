@@ -191,6 +191,7 @@ def build_robomind_ur5_experiment(*, name: str, which_arm: str, root_env: str) -
                                 use_state=True,
                                 which_arm=which_arm,  # "left" -> single-arm 7D; "dual" -> 14D
                                 gripper_invert=False,  # RoboMIND gripper is an opening fraction; kept raw.
+                                use_image_augmentation=True,  # DROID-style random crop/rescale + color jitter.
                                 iterable_shuffle=True,  # rank x worker episode-shuffle stream
                                 episode_shuffle_seed=42,
                                 action_normalization=None,

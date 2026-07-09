@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
+import torchvision.transforms as T
 from lerobot.datasets.video_utils import decode_video_frames
 
 from cosmos_framework.data.vfm.action.action_spec import ActionSpec, Gripper, Joint, build_action_spec
@@ -111,6 +112,7 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
         canvas_views: tuple[str, ...] | None = None,  # None -> auto-detect from cameras present.
         canvas_layout: CanvasLayout = "three_view_zero_pad",
         action_normalization: str | None = None,  # joint_pos -> raw, no normalization.
+        use_image_augmentation: bool = False,
         sample_stride: int = 1,
     ) -> None:
         if which_arm not in ("dual", "left", "right"):
@@ -122,6 +124,8 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
         self._use_state = bool(use_state)
         self._gripper_invert = bool(gripper_invert)
         self._canvas_layout = canvas_layout
+        self._use_image_augmentation = bool(use_image_augmentation)
+        self._image_augmentor: T.Compose | None = None
         # Single- and dual-arm map to distinct embodiment ids (7-D vs 14-D action projection).
         domain_name = "robomind-ur5-dual" if which_arm == "dual" else "robomind-ur5-single"
         super().__init__(
@@ -308,6 +312,28 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
             for feat in self._canvas_features
         ]
 
+        if self._use_image_augmentation and frames:
+            # Match DROID: random crop+rescale and color jitter before concat, with
+            # one sampled transform shared across every frame and real camera view.
+            shapes = {(int(frame.shape[-2]), int(frame.shape[-1])) for frame in frames}
+            if len(shapes) != 1:
+                raise ValueError(
+                    "use_image_augmentation=True requires all real UR5 camera views to share HxW; "
+                    f"got {sorted(shapes)}."
+                )
+            if self._image_augmentor is None:
+                _, _, h, w = frames[0].shape
+                self._image_augmentor = T.Compose(
+                    [
+                        T.RandomCrop((int(h * 0.95), int(w * 0.95))),
+                        T.Resize((h, w), antialias=True),
+                        T.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
+                    ]
+                )
+            counts = [frame.shape[0] for frame in frames]
+            augmented = self._image_augmentor(torch.cat(frames, dim=0))
+            frames = list(torch.split(augmented, counts, dim=0))
+
         if self._canvas_layout == "three_view_zero_pad":
             if not frames:
                 raise ValueError("No frames decoded for UR5 canvas.")
@@ -358,6 +384,7 @@ def get_action_robomind_ur5_sft_dataset(
     canvas_views: tuple[str, ...] | None = None,
     canvas_layout: CanvasLayout = "three_view_zero_pad",
     action_normalization: str | None = None,
+    use_image_augmentation: bool = False,
     viewpoint: str = "concat_view",
     resolution: str | int = "480",
     max_action_dim: int = 64,
@@ -384,6 +411,7 @@ def get_action_robomind_ur5_sft_dataset(
         canvas_views=canvas_views,
         canvas_layout=canvas_layout,
         action_normalization=action_normalization,
+        use_image_augmentation=use_image_augmentation,
     )
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
