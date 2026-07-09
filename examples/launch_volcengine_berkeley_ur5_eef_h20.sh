@@ -394,9 +394,13 @@ if info.get("codebase_version") != "v3.0":
     errors.append(f"codebase_version={info.get('codebase_version')!r}, expected 'v3.0'")
 if int(info.get("fps", -1)) != 5:
     errors.append(f"fps={info.get('fps')!r}, expected 5")
-if features.get("action", {}).get("shape") != [7]:
-    errors.append(f"action shape={features.get('action', {}).get('shape')!r}, expected [7]")
-for key in ("observation.images.image", "observation.images.hand_image"):
+action_shape = features.get("action", {}).get("shape")
+state_shape = features.get("observation.state", {}).get("shape")
+if action_shape != [7]:
+    errors.append(f"action shape={action_shape!r}, expected [7]")
+if state_shape != [8]:
+    errors.append(f"observation.state shape={state_shape!r}, expected [8]")
+for key in ("observation.images.hand_image", "observation.images.image"):
     if key not in features:
         errors.append(f"missing camera feature {key}")
 if errors:
@@ -409,6 +413,19 @@ print(
     f"episodes={info.get('total_episodes')}",
     f"frames={info.get('total_frames')}",
     f"fps={info.get('fps')}",
+    f"action_shape={action_shape}",
+    f"state_shape={state_shape}",
+)
+print(
+    "Berkeley action contract:",
+    "raw action[7] + observation.state[8] -> standard SE(3) delta action[10]",
+    "[dpos3,rot6d6,gripper1]",
+)
+print(
+    "Berkeley canvas contract:",
+    "top=observation.images.hand_image",
+    "bottom_left=observation.images.image",
+    "bottom_right=zero",
 )
 PY_DATASET
 }
@@ -514,6 +531,8 @@ log_effective_plan() {
   log "  BASE_CHECKPOINT_PATH=$BASE_CHECKPOINT_PATH"
   log "  WAN_VAE_PATH=$WAN_VAE_PATH"
   log "  OUTPUT_ROOT=$OUTPUT_ROOT"
+  log "  ACTION_CONTRACT=raw action[7] + observation.state[8] -> standard SE(3) delta action[10] [dpos3,rot6d6,gripper1]"
+  log "  CANVAS_CONTRACT=top=observation.images.hand_image bottom-left=observation.images.image bottom-right=zero"
   log "  EXTRA_TAIL_OVERRIDES=$EXTRA_TAIL_OVERRIDES"
 }
 

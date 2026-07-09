@@ -1,5 +1,5 @@
-TaskName: robolabsim_ur5_eef_smoke_001
-Description: RoboLabSim UR5 EEF smoke
+TaskName: robolabsim_ur5_eef_full_001
+Description: RoboLabSim UR5 EEF full training
 Entrypoint: bash /root/code/cosmos-framework/examples/launch_volcengine_robolabsim_ur5_eef_h20.sh
 ImageUrl: dexmalhub-cn-beijing.cr.volces.com/default/cosmos3_cu13_base:0.7
 ResourceQueueID: q-20260515202237-2lhfk
@@ -27,7 +27,7 @@ Envs:
     Value: 8
     IsPrivate: false
   - Name: JOB_NAME
-    Value: robolabsim_ur5_eef_smoke_001
+    Value: robolabsim_ur5_eef_full_001
     IsPrivate: false
   - Name: WANDB_MODE
     Value: online
@@ -48,10 +48,10 @@ Envs:
     Value: /root/logs
     IsPrivate: false
   - Name: MAX_ITER
-    Value: 50
+    Value: 600
     IsPrivate: false
   - Name: SAVE_ITER
-    Value: 50
+    Value: 200
     IsPrivate: false
   - Name: LOGGING_ITER
     Value: 10

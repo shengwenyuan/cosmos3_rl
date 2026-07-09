@@ -170,10 +170,17 @@ Only include `ImageCredential` when using a private image registry. Mark private
 environment variables with `IsPrivate: true` when they cannot be moved to a
 mounted token file.
 
-For mounted data, prefer vePFS/NAS/TOS paths that are already visible inside the
-container. If adding `Storages`, match the platform storage type and mount path
-exactly; for TOS storage, budget sidecar memory rather than assuming defaults
-will fit large concurrent reads.
+For mounted data, do not assume environment variables mount storage. `FAST_ROOT` paths such as
+`/mlp_vepfs/share/swy/cosmos3-framework` require the corresponding vePFS
+storage to be visible inside the training container. If adding `Storages`, match
+the platform storage type and container `MountPath` exactly; for vePFS under `volc ml_task submit --conf` 1.2.55, the smoke-proven UI-export shape is `Type: "Vepfs"`, `VepfsId`, `VepfsName`, `SubPath`, `MountPath`, and `ReadOnly`. `VepfsId` is required; omitting it fails with `VepfsId is empty`. If `VepfsName` is reported as unsupported but the task is still created, treat it as a CLI warning; if it blocks submission, drop only `VepfsName` and keep `VepfsId`. Verify the mount with a short `ls` task before launching training. For ordinary TOS Fuse mounts exported by the Volc UI, use `Type: "TosFuse"`
+with `Bucket`, `Prefix`, and `MountPath`. Do not substitute `Type: "Tos"` or
+`Type: "Sfcs"` unless you also have their required platform-specific names:
+`Tos` requires `FsName` and submit fails with `The Cloudfs Name is required`;
+`Sfcs` requires `FileSystemName` and submit fails with `The Sfcs FileSystemName
+is missing`.
+For TOS storage, budget sidecar memory rather than assuming defaults will fit
+large concurrent reads.
 
 ## Cosmos3 Launcher Mapping
 
@@ -191,6 +198,13 @@ will fit large concurrent reads.
   variables such as `MLP_WORKER_NUM`, `MLP_ROLE_INDEX`, and `MLP_WORKER_0_HOST`.
 - Set `MLP_LOG_PATH=/root/logs` so task logs can be downloaded from the
   platform, while the launcher also writes shared logs under `OUTPUT_ROOT`.
+- If the launcher fails with `missing file: .venv/bin/activate`, check whether
+  `/root/code/cosmos-framework/.venv` is a dangling symlink. A baked image may
+  contain `.venv -> /mlp_vepfs/share/swy/cosmos3-framework/venvs/...`, but
+  the custom training container still fails if `/mlp_vepfs/share/swy/.../venvs`
+  is not mounted into that task. Fix by mounting the target shared venv path or
+  by baking a real venv into the image; relinking `.venv` to the same missing
+  target does not help.
 - Use the ladder: `PREFLIGHT_ONLY=1`, then `DRYRUN_ONLY=1`, then short smoke
   training, then longer pilot/full runs.
 
@@ -213,5 +227,7 @@ Useful variants:
 
 - Add `--content error` to search logs with a Lucene-style keyword query.
 - Add `--reverse` to fetch logs in reverse order.
+- For environment checks, log both the symlink and its target, for example:
+  `ls -la /root/code/cosmos-framework/.venv /root/code/cosmos-framework/.venv/bin /mlp_vepfs/share/swy/cosmos3-framework/venvs`.
 - Use `volc ml_task cancel --id <task-id>` to cancel a submitted task.
 - Export an existing task config before cloning or modifying it.
