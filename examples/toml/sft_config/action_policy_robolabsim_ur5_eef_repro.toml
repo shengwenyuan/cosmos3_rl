@@ -1,0 +1,52 @@
+# UR5 post-training - local addition, not part of upstream Cosmos3.
+
+# RoboLabSim UR5 EEF-space action-policy SFT. This uses the same 10D EEF action
+# contract as Berkeley UR5 EEF: [translation delta(3), rot6d delta(6), gripper(1)].
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_robolabsim_ur5_eef_nano"
+project      = "cosmos3_action"
+group        = "action_sft"
+name         = "action_policy_robolabsim_ur5_eef_repro"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 2.0e-5
+
+[scheduler]
+cycle_lengths  = [600]
+f_max          = [0.4]
+f_min          = [0.0]
+f_start        = [0.0]
+warm_up_steps  = [20]
+
+[trainer]
+max_iter        = 600
+logging_iter    = 10
+grad_accum_iter = 1
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 0.5
+force_finite = true
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100
+
+[dataloader_train]
+max_samples_per_batch = 4

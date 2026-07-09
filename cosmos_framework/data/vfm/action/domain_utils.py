@@ -26,6 +26,7 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
     "berkeley-ur5-eef": 29,  # Berkeley AUTOLab UR5, 10D EEF delta pose
     "robomind-ur5-single": 30,  # single-arm UR5e, 7D joint_pos
     "robomind-ur5-dual": 31,  # dual-arm UR5e, 14D joint_pos
+    "robolabsim-ur5-eef": 29,  # alias of the UR5 EEF 10D delta-pose domain
 }
 
 
@@ -40,6 +41,7 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
     "robomind-franka-dual": 20,
     "robomind-ur": 10,
     "berkeley-ur5-eef": 10,
+    "robolabsim-ur5-eef": 10,
     # NOTE: robomind-ur5-single/-dual are intentionally ABSENT here. This dict is the ee_pose /
     # midtrain (cartesian) raw width used only by offline FD/ID inference (inference/action.py)
     "embodiment_b": 30,

@@ -100,6 +100,7 @@ def make_config() -> Config:
 
     # UR5e post-training — local additions, not part of upstream Cosmos3.
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_berkeley_ur5_eef_nano  # noqa: F401, E501
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robolabsim_ur5_eef_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robomind_ur5_single_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robomind_ur5_dual_nano  # noqa: F401, E501
 
