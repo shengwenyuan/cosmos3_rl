@@ -76,10 +76,10 @@ _DEFAULT_JOINT_DOF = 7
 _DEFAULT_GRIPPER_DIM = 1
 _DEFAULT_EEF_POSE_ACTION_DIM = 10
 _DEFAULT_ROBOLAB_OUTPUT_DIR = DEFAULT_FALLBACK_OUTPUT_DIR / "robolab"
-_CONCAT_VIEW_DESCRIPTION = (
-    "The top row is the wrist camera. "
-    "The bottom-left row is the external Berkeley UR5 camera; "
-    "the bottom-right row is a zero-padded missing view."
+_DEFAULT_CONCAT_VIEW_DESCRIPTION = (
+    "The top row is from the wrist-mounted camera. "
+    "The bottom row contains two horizontally concatenated third-person perspective views of the scene from opposite "
+    "sides, with the robot visible."
 )
 _DEFAULT_HF_REVISION = "main"
 _ROBOLAB_POLICY_HF_REPOSITORIES = {
@@ -342,6 +342,7 @@ class RobolabPolicyConfig:
     action_space: ActionSpace = "joint_pos"
     use_state: bool = True
     history_length: int = 1
+    view_description: str = _DEFAULT_CONCAT_VIEW_DESCRIPTION
 
 
 class RobolabServerArgs(pydantic.BaseModel):
@@ -411,6 +412,8 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Whether the first action row contains the current state."""
     history_length: int = 1
     """State/history action rows to trim from the generated action output."""
+    view_description: str = _DEFAULT_CONCAT_VIEW_DESCRIPTION
+    """Additional concat-view camera caption appended to the generic viewpoint prompt."""
 
 
 def _resolve_action_dim(args: RobolabServerArgs) -> int:
@@ -493,6 +496,7 @@ class RobolabPolicyService:
             gripper_dim=int(args.gripper_dim),
             use_state=bool(args.use_state),
             history_length=int(args.history_length),
+            view_description=str(args.view_description),
         )
         if self.cfg.history_length < (1 if self.cfg.use_state else 0):
             raise ValueError("--history-length must be >= 1 when --use-state is true")
@@ -647,7 +651,7 @@ class RobolabPolicyService:
             "mode": "policy",
             "domain_id": torch.tensor(get_domain_id(self.cfg.domain_name), dtype=torch.long),  # []
             "viewpoint": "concat_view",
-            "additional_view_description": _CONCAT_VIEW_DESCRIPTION,
+            "additional_view_description": self.cfg.view_description,
         }
         if history_action is not None:
             sample["history_action"] = history_action

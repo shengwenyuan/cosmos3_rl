@@ -18,10 +18,12 @@ with patch("cosmos_framework.inference.common.init._init_script", lambda **kwarg
     for module_name in (
         "cosmos_framework.scripts.action_policy_server_utils",
         "cosmos_framework.scripts.action_policy_server_robolab",
+        "cosmos_framework.scripts.action_policy_server_robolab_div",
     ):
         if module_name in sys.modules:
             del sys.modules[module_name]
     from cosmos_framework.scripts import action_policy_server_robolab as robolab_server  # noqa: E402
+    from cosmos_framework.scripts import action_policy_server_robolab_div as robolab_div_server  # noqa: E402
 
 pytestmark = [pytest.mark.L0, pytest.mark.CPU]
 
@@ -96,6 +98,13 @@ def test_server_args_default_to_released_droid_serving_config() -> None:
     assert args.deterministic_seed is False
 
 
+def test_div_server_args_default_to_three_camera_view_description() -> None:
+    args = robolab_div_server.RobolabServerArgs()
+
+    assert "wrist-mounted camera" in args.view_description
+    assert "two shoulder camera views" in args.view_description
+
+
 def test_joint_pos_observation_preprocessing_matches_internal_layout() -> None:
     service = object.__new__(robolab_server.RobolabPolicyService)
     service.cfg = robolab_server.RobolabPolicyConfig(
@@ -139,6 +148,51 @@ def test_joint_pos_observation_preprocessing_matches_internal_layout() -> None:
     np.testing.assert_allclose(sample["history_action"][0].numpy(), np.concatenate([joint_position[0], [0.8]]))
     assert sample["ai_caption"] == "open the drawer"
     assert sample["viewpoint"] == "concat_view"
+
+
+def test_div_joint_pos_observation_uses_configured_view_description() -> None:
+    service = object.__new__(robolab_div_server.RobolabPolicyService)
+    service.cfg = robolab_div_server.RobolabPolicyConfig(
+        checkpoint_path="/unused/model",
+        domain_name="robomind-ur5-single",
+        decode_video=False,
+        seed=0,
+        deterministic_seed=True,
+        guidance=3.0,
+        num_steps=4,
+        shift=5.0,
+        conditioning_fps=15.0,
+        resolution=None,
+        action_chunk_size=4,
+        action_dim=7,
+        image_height=4,
+        image_width=5,
+        action_space="joint_pos",
+        joint_dof=6,
+        gripper_dim=1,
+        use_state=True,
+        history_length=2,
+        view_description="custom wrist camera and two masked shoulder views",
+    )
+    service._transform = lambda sample, resolution: sample
+
+    image = np.zeros((4, 5, 3), dtype=np.uint8)
+    joint_position = np.arange(12, dtype=np.float32).reshape(2, 6)
+    gripper_position = np.array([[0.2], [0.3]], dtype=np.float32)
+    obs = {
+        "prompt": "pick the cube",
+        "observation/image": image,
+        "observation/joint_position": joint_position,
+        "observation/gripper_position": gripper_position,
+    }
+
+    sample = robolab_div_server.RobolabPolicyService._build_sample(service, obs)
+
+    assert sample["action"].shape == (5, 7)
+    np.testing.assert_allclose(sample["action"][0].numpy(), np.concatenate([joint_position[-1], [0.7]]))
+    assert sample["history_action"].shape == (1, 7)
+    np.testing.assert_allclose(sample["history_action"][0].numpy(), np.concatenate([joint_position[0], [0.8]]))
+    assert sample["additional_view_description"] == "custom wrist camera and two masked shoulder views"
 
 
 def test_build_data_batch_wraps_multi_item_keys_like_internal_server() -> None:
