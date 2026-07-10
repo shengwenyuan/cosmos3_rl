@@ -1,0 +1,96 @@
+# =============================================================================
+# Cosmos3-Nano (MT-init) post-training on RoboMIND1 UR5, B200 bs128 reference
+# Template — map key names to your own trainer's schema.
+#
+# DATASET / SCHEDULE BASIS
+#   n_frames        : 2,965,157
+#   n_episodes      : 22,044
+#   chunk_length    : 32
+#   n_windows       : n_frames - n_episodes * chunk_length = 2,259,749
+#   B200 shape      : 8 GPUs * MAX_SAMPLES_PER_BATCH=128 -> effective global batch 1024
+#   target_epochs   : ~4.9 window passes, aligned to DROID's raw-window exposure
+#   max_iters       : 4.9 * 2,259,749 / 1024 = 10,814 -> rounded to 10,800
+#
+# STILL VERIFY BEFORE LAUNCH
+#   gripper.mode    : check the RoboMIND gripper field in your lerobot set:
+#                        continuous width -> "continuous" (matches MT; preferred)
+#                        binary open/close -> "binary"
+# =============================================================================
+
+init:
+  from_checkpoint: cosmos3-nano-midtrain      # resume the MT checkpoint
+  action_encoder: from_scratch                # fresh — MT has no UR5 7D joint head
+  action_decoder_mlp: from_scratch
+  action_embed_tokens: from_scratch
+  precision: bf16
+
+# ------------------------------------------------------------------ data / obs
+data:
+  fps: 15                                     # matches DROID -> recipe transfers as-is
+  cameras: [overhead]                         # single real view in this LeRobot set
+  image_hw: [360, 640]                        # raw overhead camera resolution
+  canvas_hw: [540, 640]                       # DROID-style concat canvas; top real view + two black missing views
+  image_augmentation: true                    # random img aug, per DROID recipe
+  filter_idle_frames: true                    # only if labels/filtering are available in the conversion
+  filter_failed_demos: true                   # only if labels/filtering are available in the conversion
+  action_norm: none                           # match DROID joint_pos code path: raw absolute joints, no action stats
+
+# --------------------------------------------------------------- action space
+action:
+  type: absolute_joint_positions              # derive from state, NOT EEF, no IK
+  arm_dof: 6                                  # UR5 is 6-DOF (NOT 7 like Franka)
+  horizon: 32                                 # 32 steps @15fps ~ 2.13s (== DROID)
+  target_source: state_future_joints          # joints at t+1..t+32 from lerobot state
+  proprio: current_joints                     # current 6 joints (+gripper) as state
+
+gripper:
+  mode: continuous                            # verify field polarity before final full run
+  dim: 1
+
+# ------------------------------------------------------------------ optimizer
+optim:
+  name: fused_adamw                           # follow mid-training
+  base_lr: 2.5e-5                             # linear-scale from 2e-4 @ global batch 8192 to 1024
+  action_lr_multiplier: 5.0                   # 5x on fresh action params
+  betas: [0.9, 0.95]
+  weight_decay: 0.05
+  grad_clip_norm: 1.0
+  action_loss_scale: 10.0
+  per_rank_batch: 128                         # MAX_SAMPLES_PER_BATCH on each visible GPU
+  world_size: 8
+  global_batch: 1024                          # 8 * 128
+  grad_accum: 1
+
+# ------------------------------------------------------------------- schedule
+schedule:
+  lr_schedule: linear_decay
+  warmup_steps: 1500
+  # max_iters = target_epochs * n_windows / global_batch
+  #   4.9 * 2,259,749 / 1024 = 10,814 -> 10,800
+  # Use the same value for scheduler.cycle_lengths / decay horizon.
+  max_iters: 10800
+  decay_to_step: 10800
+  target_epochs: 4.9
+  steps_per_epoch: 2207                       # 2,259,749 / 1024
+
+# ------------------------------------------------------ checkpoint / evaluation
+eval:
+  checkpoint_every: 1200
+  eval_every: 1200                            # closed-loop; DON'T trust the loss curve
+  start_eval_at: 2400
+  keep_best_on: closed_loop_success
+  match_camera_to_training: true
+
+# ------------------------------------------------------------------- inference
+inference:
+  diffusion_steps: 4                          # DROID inference config
+  noise_shift: 5
+  cfg_scale: 3
+  cfg_parallel: true
+  skip_video_latent_decode: true              # latency; not needed for control
+  controller: joint_position
+  control_hz: 15
+
+# ------------------------------------------------------------------- auxiliary
+aux:
+  predict_video_frames: true                  # keep aux RGB output (world-action coupling)
