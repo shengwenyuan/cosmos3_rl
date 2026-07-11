@@ -19,8 +19,10 @@ import copy
 from hydra.core.config_store import ConfigStore
 
 from cosmos_framework.configs.base.experiment.sft.models.nano_model_config import NANO_MODEL_CONFIG
-from cosmos_framework.data.vfm.action.datasets.berkeley_ur5_eef_dataset import get_action_berkeley_ur5_eef_sft_dataset
-from cosmos_framework.data.vfm.joint_dataloader import PackingDataLoader, RankPartitionedDataLoader
+from cosmos_framework.data.generator.action.datasets.berkeley_ur5_eef_dataset import (
+    get_action_berkeley_ur5_eef_sft_dataset,
+)
+from cosmos_framework.data.generator.joint_dataloader import PackingDataLoader, RankPartitionedDataLoader
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
 

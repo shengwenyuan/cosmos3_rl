@@ -120,8 +120,8 @@ That path converts Berkeley `action[7]` delta-RPY into a 10D EEF delta action. L
 
 ## Code Pointers
 
-- Joint dataset: `cosmos_framework/data/vfm/action/datasets/robomind_ur5_dataset.py`
-- Berkeley EEF dataset: `cosmos_framework/data/vfm/action/datasets/berkeley_ur5_eef_dataset.py`
-- Canvas helper: `cosmos_framework/data/vfm/action/datasets/canvas_utils.py`
+- Joint dataset: `cosmos_framework/data/generator/action/datasets/robomind_ur5_dataset.py`
+- Berkeley EEF dataset: `cosmos_framework/data/generator/action/datasets/berkeley_ur5_eef_dataset.py`
+- Canvas helper: `cosmos_framework/data/generator/action/datasets/canvas_utils.py`
 - Joint experiment: `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_robomind_ur5_single_nano.py`
 - Berkeley EEF experiment: `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_berkeley_ur5_eef_nano.py`

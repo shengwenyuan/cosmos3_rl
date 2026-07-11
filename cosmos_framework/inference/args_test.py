@@ -22,7 +22,7 @@ from cosmos_framework.inference.args import (
 from cosmos_framework.inference.common.config import structure_config
 
 if TYPE_CHECKING:
-    from cosmos_framework.model.vfm.omni_mot_model import OmniMoTModel
+    from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
 
 _H100_MEMORY_BYTES = 80 * 1024**3
 # Reserved for future use (paired with the reserved memory-based `_get_dp_shard_size`
@@ -209,6 +209,7 @@ def test_build_sound_data_rejects_model_without_sound_gen():
 
 def test_audio_image2video_conditions_image_and_sound(tmp_path: Path):
     import omegaconf
+
     from cosmos_framework.inference.common.config import structure_config
 
     setup_args = OmniSetupOverrides(
@@ -234,3 +235,15 @@ def test_audio_image2video_conditions_image_and_sound(tmp_path: Path):
     assert args.condition_frame_indexes_vision == [0]
     assert args.enable_sound is True
     assert Path(args.sound_path).name == "clip.wav"
+
+
+def test_reasoner_video_fps_defaults_none():
+    from cosmos_framework.inference.args import ReasonerDataOverrides
+
+    assert ReasonerDataOverrides().video_fps is None
+
+
+def test_reasoner_video_fps_accepts_positive_float():
+    from cosmos_framework.inference.args import ReasonerDataOverrides
+
+    assert ReasonerDataOverrides(video_fps=2.0).video_fps == 2.0
