@@ -20,7 +20,10 @@ Do not silently change these fields:
 ## Environment Checklist
 
 1. Read `~/.bashrc` before doing anything. Confirm `COSMOS3_FRAMEWORK_HOME`, `UV_PROJECT_ENVIRONMENT`, `UV_CACHE_DIR`, and any `LD_LIBRARY_PATH` behavior.
-2. Use the RoboLab client through SSH when needed:
+2. Use the RoboLab client through SSH when needed. Prefer the dedicated
+   `~/.ssh/cosmos3_robolab_20260627` key when it exists; on newly provisioned
+   PAI/DSW server containers it may be absent, in which case fall back to the
+   available project key such as `~/.ssh/id_ed25519` after verifying SSH works:
    ```bash
    ssh -i ~/.ssh/cosmos3_robolab_20260627 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p 2222 root@10.174.136.228
    ```
@@ -29,6 +32,19 @@ Do not silently change these fields:
    /workspace/isaaclab/isaaclab.sh -p
    ```
 4. On the server, validate CUDA before launching the policy server. On the 2026-06-30 mirror server, `LD_LIBRARY_PATH=/usr/local/cuda/compat/lib` was required for `torch.cuda.is_available()` to be true; clearing `LD_LIBRARY_PATH` made CUDA unavailable. Re-check on every new server.
+5. Do not assume the default `python` is the Cosmos environment. On PAI/DSW
+   containers, `/usr/local/bin/python` may be a system interpreter without
+   PyTorch. Prefer the active `UV_PROJECT_ENVIRONMENT` when set; otherwise look
+   under `$COSMOS3_FRAMEWORK_HOME/venvs/` and validate the selected interpreter
+   with `import torch`, `torch.cuda.is_available()`, and the policy-server
+   imports.
+6. Do not hard-code an old server address. Detect the IP reachable from the
+   RoboLab client on every run. Good checks are `hostname -I`, `ip route get
+   <client-ip>` on the server, the policy-server "Server accessible at" log
+   line, and a client-side `curl http://<server-ip>:8000/healthz` before
+   launching Isaac Sim. The current thread verified a new PAI/DSW server via
+   source IP `10.169.233.61` to client `10.174.136.228`; do not reuse older
+   addresses such as `10.174.241.114` unless routing confirms them.
 
 ## Server Start
 
@@ -99,6 +115,25 @@ Choose the client runner by robot backend before composing the command. Do not a
 | Unknown/new robot | Inspect `policies/cosmos3/run_<robot>.py`, its registration import, camera presets, proprio observation keys, and action manager width before launching. Preserve the user-provided runner if they already supplied one. Match server `--action-space`, `--joint-dof`, `--gripper-dim`, and `--action-dim` to that runner. |
 
 For explicit task files, prefer full client-side task paths such as `robolab/tasks/atomic_pnp/banana_in_bowl_task.py` over a bare filename. This avoids ambiguity between `atomic_pnp`, `benchmark`, and other task roots and ensures registration happens before the policy client is constructed.
+
+DROID joint-position banana-in-bowl smoke verified on 2026-07-11 from a new
+PAI/DSW server:
+
+- Server DCP checkpoint:
+  `/mlp_vepfs/share/swy/cosmos3-framework/outputs/droid_full_bs32_002/cosmos3_action/action_sft/droid_full_bs32_002/checkpoints/iter_000002000/model`
+- Server config:
+  `/mlp_vepfs/share/swy/cosmos3-framework/outputs/droid_full_bs32_002/cosmos3_action/action_sft/droid_full_bs32_002/config.yaml`
+- Server args that mattered:
+  `--domain-name droid_lerobot --action-space joint_pos --joint-dof 7
+  --gripper-dim 1 --action-dim 8 --conditioning-fps 15 --action-chunk-size 32
+  --resolution 480 --seed 0 --deterministic-seed`
+- Client command shape:
+  `policies/cosmos3/run.py --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py
+  --num-envs 1 --num-runs 1 --video-mode all --headless`
+- The client `ActionManager` reported shape 8 (`body=7`, `finger_joint=1`),
+  and the server returned `action_shape=(32, 8)`. The run produced both
+  viewport and sensor mp4s. Task success was false, but the server-client
+  action and video-recording chain completed cleanly.
 
 ## Client Command Template
 
