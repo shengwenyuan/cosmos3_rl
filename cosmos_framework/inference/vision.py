@@ -12,12 +12,11 @@ import torchvision.io
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-from cosmos_framework.data.vfm.sequence_packing import SequencePlan
-from cosmos_framework.data.vfm.utils import VIDEO_RES_SIZE_INFO
+from cosmos_framework.data.generator.sequence_packing import SequencePlan
+from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.utils import log
 
 _MINE_MARKER = "MINE_div"
-
 
 def _log_mine(stage: str, event: str, **fields: Any) -> None:
     field_text = " ".join(f"{key}={value!r}" for key, value in fields.items())
