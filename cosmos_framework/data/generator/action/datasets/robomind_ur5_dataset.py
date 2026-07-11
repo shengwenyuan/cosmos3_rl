@@ -27,14 +27,14 @@ import numpy as np
 import torch
 from lerobot.datasets.video_utils import decode_video_frames
 
-from cosmos_framework.data.vfm.action.action_spec import ActionSpec, Gripper, Joint, build_action_spec
-from cosmos_framework.data.vfm.action.datasets.action_sft_dataset import (
+from cosmos_framework.data.generator.action.action_spec import ActionSpec, Gripper, Joint, build_action_spec
+from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
     ActionIterableShuffleDataset,
     ActionSFTDataset,
 )
-from cosmos_framework.data.vfm.action.datasets.base_dataset import ActionBaseDataset
-from cosmos_framework.data.vfm.action.datasets.canvas_utils import concat_three_view_canvas, zero_like_view
-from cosmos_framework.data.vfm.action.transforms import ActionTransformPipeline
+from cosmos_framework.data.generator.action.datasets.base_dataset import ActionBaseDataset
+from cosmos_framework.data.generator.action.datasets.canvas_utils import concat_three_view_canvas, zero_like_view
+from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
 
 PoseConvention = Literal["backward_framewise"]
 Viewpoint = Literal["concat_view"]
@@ -170,7 +170,7 @@ class RoboMINDUR5Dataset(ActionBaseDataset):
     def _stats_path(cls) -> Path:
         # Unused while action_normalization=None (joint_pos is raw). Present for the abstract
         # contract / a future ee_pose (cartesian) variant, which would need computed stats.
-        return Path(__file__).parent / "stats/robomind_ur5_stats.json"
+        return Path(__file__).parent.parent / "normalizer_stats/robomind_ur5_stats.json"
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         mode = self._choose_mode()

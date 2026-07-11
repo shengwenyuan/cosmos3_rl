@@ -21,7 +21,7 @@ Berkeley SFT now follows the DROID-style concat-view contract:
 validation checks below before launching the next Berkeley full run:
 
 - Training adapter:
-  - `cosmos_framework/data/vfm/action/datasets/berkeley_ur5_eef_dataset.py`
+  - `cosmos_framework/data/generator/action/datasets/berkeley_ur5_eef_dataset.py`
     resolves `canvas_views` as wrist first, external second, then zero-fills the
     bottom-right quadrant.
   - The class docstring and `additional_view_description` describe the same

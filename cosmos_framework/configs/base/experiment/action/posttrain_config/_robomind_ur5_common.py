@@ -14,8 +14,8 @@ Convert the RoboMIND HDF5 to LeRobot v3 first (``tools/convert_robomind_hdf5_to_
 import copy
 
 from cosmos_framework.configs.base.experiment.sft.models.nano_model_config import NANO_MODEL_CONFIG
-from cosmos_framework.data.vfm.action.datasets.robomind_ur5_dataset import get_action_robomind_ur5_sft_dataset
-from cosmos_framework.data.vfm.joint_dataloader import (
+from cosmos_framework.data.generator.action.datasets.robomind_ur5_dataset import get_action_robomind_ur5_sft_dataset
+from cosmos_framework.data.generator.joint_dataloader import (
     PackingDataLoader,
     RankPartitionedDataLoader,
 )
