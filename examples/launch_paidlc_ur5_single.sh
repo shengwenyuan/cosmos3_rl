@@ -15,11 +15,13 @@ set -Eeuo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/root/code/cosmos-framework}"
 FAST_ROOT="${FAST_ROOT:-${COSMOS3_FRAMEWORK_HOME:-/mlp_vepfs/share/swy/cosmos3-framework}}"
+TRAIN_VENV="${TRAIN_VENV:-$FAST_ROOT/venvs/cosmos-framework-cu130-train}"
 
 DATASET_PATH="${DATASET_PATH:-${PAI_INPUT_TRAIN:-$FAST_ROOT/lerobot/robomind1-ur5-joint}}"
 UR5_SINGLE_ROOT="${UR5_SINGLE_ROOT:-$DATASET_PATH}"
 BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-$FAST_ROOT/checkpoints/Cosmos3-Nano-dcp}"
 WAN_VAE_PATH="${WAN_VAE_PATH:-$FAST_ROOT/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
+QWEN_TOKENIZER_PATH="${QWEN_TOKENIZER_PATH:-$FAST_ROOT/modelscope/hub/Qwen/Qwen3-VL-8B-Instruct}"
 
 PAI_JOB_TOKEN="${PAI_JOB_ID:-${PAI_JOB_NAME:-${PAI_TRIAL_ID:-}}}"
 RUN_STAMP="${RUN_STAMP:-${PAI_JOB_TOKEN:-$(date -u +%Y%m%dT%H%M%SZ)}}"
@@ -150,14 +152,18 @@ source_env() {
 activate_repo_env() {
   require_dir "$REPO_ROOT"
   cd "$REPO_ROOT"
-  require_file ".venv/bin/activate"
+  require_file "$TRAIN_VENV/bin/activate"
   # shellcheck disable=SC1091
-  source ".venv/bin/activate"
+  source "$TRAIN_VENV/bin/activate"
   hash -r
-  PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+  PYTHON_BIN="${PYTHON_BIN:-$TRAIN_VENV/bin/python}"
   export PYTHON_BIN
   export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-  export LD_LIBRARY_PATH=
+
+  local site_packages python_lib_dir
+  site_packages="$("$PYTHON_BIN" -c 'import site; print(site.getsitepackages()[0])')"
+  python_lib_dir="$("$PYTHON_BIN" -c 'from pathlib import Path; import sysconfig; print(Path(sysconfig.get_paths()["stdlib"]).parent)')"
+  export LD_LIBRARY_PATH="$site_packages/torch/lib:$python_lib_dir:$site_packages/nvidia/cu13/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC PYTORCH_ALLOC_CONF NCCL_DEBUG
 }
 
@@ -238,7 +244,7 @@ resolve_topology() {
 
 validate_static_values() {
   local name value
-  for name in JOB_NAME NPROC_PER_NODE NNODES NODE_RANK MASTER_PORT DATASET_PATH UR5_SINGLE_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH OUTPUT_ROOT; do
+  for name in JOB_NAME NPROC_PER_NODE NNODES NODE_RANK MASTER_PORT TRAIN_VENV DATASET_PATH UR5_SINGLE_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH QWEN_TOKENIZER_PATH OUTPUT_ROOT; do
     value="${!name-}"
     [[ "$value" != *"<"* && "$value" != *">"* && "$value" != "TODO"* && "$value" != "todo"* ]] \
       || die "$name still looks like a placeholder: $value"
@@ -271,6 +277,9 @@ validate_paths() {
   require_dir "$FAST_ROOT"
   require_file "$TOML_FILE"
   require_file "$LAUNCHER"
+  require_dir "$TRAIN_VENV"
+  require_file "$TRAIN_VENV/bin/python"
+  require_cmd ffmpeg
 
   require_dir "$UR5_SINGLE_ROOT"
   require_file "$UR5_SINGLE_ROOT/meta/info.json"
@@ -285,6 +294,10 @@ validate_paths() {
   (( shard_count > 0 )) || die "no .distcp shards under $BASE_CHECKPOINT_PATH/model"
 
   require_file "$WAN_VAE_PATH"
+  require_dir "$QWEN_TOKENIZER_PATH"
+  require_file "$QWEN_TOKENIZER_PATH/vocab.json"
+  require_file "$QWEN_TOKENIZER_PATH/merges.txt"
+  require_file "$QWEN_TOKENIZER_PATH/tokenizer_config.json"
 }
 
 validate_dataset_metadata() {
@@ -366,6 +379,16 @@ for i in range(torch.cuda.device_count()):
 PY_HARDWARE
 }
 
+validate_video_backend() {
+  "$PYTHON_BIN" - <<'PY_VIDEO'
+import torchcodec
+from torchcodec.decoders import VideoDecoder
+
+print("torchcodec", torchcodec.__version__)
+print("video_decoder", VideoDecoder.__name__)
+PY_VIDEO
+}
+
 validate_wandb() {
   if [[ "$WANDB_MODE" == "disabled" ]]; then
     log "W&B disabled by WANDB_MODE=disabled."
@@ -419,6 +442,7 @@ build_tail_overrides() {
     "dataloader_train.max_samples_per_batch=$MAX_SAMPLES_PER_BATCH"
     "optimizer.lr=$OPTIMIZER_LR"
     "scheduler.cycle_lengths=[$SCHEDULER_CYCLE_LENGTH]"
+    "model.config.vlm_config.tokenizer.pretrained_model_name=$QWEN_TOKENIZER_PATH"
     "model.config.parallelism.data_parallel_shard_degree=$DP_SHARD"
     "model.config.parallelism.data_parallel_replicate_degree=$DP_REPLICATE"
     "trainer.profiling.target_ranks=[0]"
@@ -435,6 +459,8 @@ build_tail_overrides() {
 log_effective_plan() {
   log "Effective PAI-DLC launch plan:"
   log "  JOB_NAME=$JOB_NAME"
+  log "  TRAIN_VENV=$TRAIN_VENV"
+  log "  PYTHON_BIN=$PYTHON_BIN"
   log "  WORLD_SIZE=$WORLD_SIZE NNODES=$NNODES NODE_RANK=$NODE_RANK NPROC_PER_NODE=$NPROC_PER_NODE MASTER_ADDR=${MASTER_ADDR:-<unset>} MASTER_PORT=$MASTER_PORT"
   log "  DP_SHARD=$DP_SHARD DP_REPLICATE=$DP_REPLICATE"
   log "  MAX_ITER=$MAX_ITER SAVE_ITER=$SAVE_ITER MAX_SAMPLES_PER_BATCH=$MAX_SAMPLES_PER_BATCH OPTIMIZER_LR=$OPTIMIZER_LR"
@@ -442,6 +468,7 @@ log_effective_plan() {
   log "  UR5_SINGLE_ROOT=$UR5_SINGLE_ROOT"
   log "  BASE_CHECKPOINT_PATH=$BASE_CHECKPOINT_PATH"
   log "  WAN_VAE_PATH=$WAN_VAE_PATH"
+  log "  QWEN_TOKENIZER_PATH=$QWEN_TOKENIZER_PATH"
   log "  OUTPUT_ROOT=$OUTPUT_ROOT"
   log "  LOG_FILENAME=$LOG_FILENAME"
   log "  ACTION_CONTRACT=raw 7D [joint6,gripper] + use_state=True; gripper polarity intentionally unchanged"
@@ -465,7 +492,7 @@ run_dryrun() {
 }
 
 launch_training() {
-  export DATASET_PATH UR5_SINGLE_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH
+  export DATASET_PATH UR5_SINGLE_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH QWEN_TOKENIZER_PATH
   export OUTPUT_ROOT IMAGINAIRE_OUTPUT_ROOT LOG_FILENAME
   export NPROC_PER_NODE NNODES NODE_RANK MASTER_PORT
   if [[ -n "${MASTER_ADDR:-}" ]]; then
@@ -493,6 +520,7 @@ main() {
   validate_paths
   validate_dataset_metadata
   validate_hardware
+  validate_video_backend
   validate_wandb
   write_job_metadata
   build_tail_overrides
