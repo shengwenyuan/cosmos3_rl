@@ -30,9 +30,8 @@ validation checks below before launching the next Berkeley full run:
     configures `canvas_views=("observation.images.hand_image",
     "observation.images.image")`.
 - Server:
-  - `_CONCAT_VIEW_DESCRIPTION` in
-    `cosmos_framework/scripts/action_policy_server_robolab_div.py` now describes
-    `top=wrist`, `bottom-left=external`, `bottom-right=zero`.
+  - `action_policy.observation` in the training TOML and persisted sidecar
+    describes `top=wrist`, `bottom-left=external`, `bottom-right=zero`.
 - Client:
   - `Cosmos3UR5Client._compose_canvas()` in the RoboLab client must use the same
     request image layout: top wrist, bottom-left external, bottom-right zero.
@@ -69,36 +68,30 @@ Acceptance checks:
 
 ## 5. Restore Standard Server EEF Decoding
 
-The divided RoboLab server now uses the standard inverse conversion for
+The manifest-driven RoboLab server now uses the standard inverse conversion for
 checkpoints trained on SE(3) deltas. Older native-command Berkeley checkpoints
 should not use this path without their temporary decoder:
 
 - `_temporary_berkeley_native_command_to_abs_eef_pose()` is removed from the new
-  checkpoint path in `cosmos_framework/scripts/action_policy_server_robolab_div.py`.
-- In the `eef_pose` response branch:
+  checkpoint path in `cosmos_framework/scripts/action_policy_server_robolab.py`.
+- In the `eef_delta -> eef_absolute` codec:
   - Build `initial_pose` from the latest `observation/eef_pos` and
     `observation/eef_quat`.
   - Decode model output with
     `pose_rel_to_abs(action_np[:, :9], rotation_format="rot6d", pose_convention="backward_framewise", initial_pose=initial_pose)`.
   - Return the client 8D absolute EEF contract:
     `[position(3), quat_xyzw(4), gripper(1)]`.
-- Keep `--action-space eef_pose --action-dim 10` as the raw model-output
-  contract; the server response remains 8D after decoding.
-- Re-check the gripper inversion line in the server after the new training
-  target is chosen. It should be a documented convention, not a hidden fixup.
+- Keep the manifest's 10D `model_action` and 8D `wire_action` layouts aligned;
+  the response remains 8D after decoding.
+- Model and wire gripper semantics are explicit manifest fields; wire semantics
+  are always canonical `close_fraction`.
 
 ## 6. Keep State And History Semantics Consistent
 
 The current Berkeley dataset emits `chunk_length` action rows for
 `chunk_length + 1` video frames and does not prepend a state/action history row.
-Deployment should keep:
-
-```bash
---no-use-state --history-length 0
-```
-
-unless the training dataset is intentionally changed to include state or history
-conditioning.
+The manifest therefore declares `state_rows=0` and `history_rows=0`. There is
+no server CLI override for these training semantics.
 
 If history is added later:
 

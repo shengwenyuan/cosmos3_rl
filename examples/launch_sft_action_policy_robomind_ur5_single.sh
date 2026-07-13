@@ -22,7 +22,7 @@
 # ============================================================================
 
 TOML_FILE="examples/toml/sft_config/action_policy_robomind_ur5_single_repro.toml"
-: "${DATASET_PATH:=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5}"
+: "${DATASET_PATH:=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/robomind1-ur5-joint}"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Nano}"
 
 # The experiment reads ${oc.env:UR5_SINGLE_ROOT}; bridge the launcher's DATASET_PATH to it.

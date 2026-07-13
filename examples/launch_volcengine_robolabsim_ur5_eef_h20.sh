@@ -6,7 +6,7 @@
 # environment, checks hardware and W&B, computes distributed topology overrides,
 # then delegates to the paired launcher:
 #
-#   examples/launch_sft_action_policy_robolabsim_ur5_eef.sh
+#   examples/launch_sft_action_policy_ur5_single_eef.sh
 #
 set -Eeuo pipefail
 
@@ -16,18 +16,17 @@ SLOW_ROOT="${SLOW_ROOT:-/dexmal-datainfra-swy}"
 BOOTSTRAP_DIR="${BOOTSTRAP_DIR:-$SLOW_ROOT/bootstrap}"
 VOLC_BOOTSTRAP_FILE="${VOLC_BOOTSTRAP_FILE:-$REPO_ROOT/examples/volc_bootstrap_cosmos3_train.sh}"
 
-DATASET_PATH="${DATASET_PATH:-$FAST_ROOT/lerobot/robolabsim-147}"
+DATASET_PATH="${DATASET_PATH:-$FAST_ROOT/lerobot/robolabsim-eef-147}"
 ROBOLABSIM_UR5_ROOT="${ROBOLABSIM_UR5_ROOT:-$DATASET_PATH}"
 BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-$FAST_ROOT/checkpoints/Cosmos3-Nano-dcp}"
 WAN_VAE_PATH="${WAN_VAE_PATH:-$FAST_ROOT/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
 
-RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-JOB_NAME="${JOB_NAME:-action_policy_robolabsim_ur5_eef_h20_${RUN_STAMP}}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$FAST_ROOT/outputs/robolabsim_ur5_eef_h20}"
+JOB_NAME="${JOB_NAME:-robolabsim_ur5_eef_overfit}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$FAST_ROOT/outputs/$JOB_NAME}"
 IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 LOG_FILENAME="${LOG_FILENAME:-${JOB_NAME}_sft.log}"
 
-TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_robolabsim_ur5_eef_repro.toml}"
+TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_ur5_single_eef_overfit.toml}"
 WANDB_MODE="${WANDB_MODE:-online}"
 FIX_WANDB_CORE="${FIX_WANDB_CORE:-1}"
 ALLOW_WANDB_MISSING="${ALLOW_WANDB_MISSING:-0}"
@@ -42,10 +41,10 @@ MIN_WORLD_SIZE="${MIN_WORLD_SIZE:-8}"
 STRICT_RECOMMENDED_WORLD_SIZE="${STRICT_RECOMMENDED_WORLD_SIZE:-0}"
 
 MAX_ITER="${MAX_ITER:-600}"
-SAVE_ITER="${SAVE_ITER:-100}"
+SAVE_ITER="${SAVE_ITER:-200}"
 LOGGING_ITER="${LOGGING_ITER:-10}"
 MAX_SAMPLES_PER_BATCH="${MAX_SAMPLES_PER_BATCH:-4}"
-OPTIMIZER_LR="${OPTIMIZER_LR:-2.0e-5}"
+OPTIMIZER_LR="${OPTIMIZER_LR:-5.0e-5}"
 SCHEDULER_CYCLE_LENGTH="${SCHEDULER_CYCLE_LENGTH:-600}"
 ALLOW_RISKY_BATCH="${ALLOW_RISKY_BATCH:-0}"
 EXPECTED_GPU_NAME_SUBSTR="${EXPECTED_GPU_NAME_SUBSTR:-H20}"
@@ -383,7 +382,7 @@ validate_paths() {
 
   require_file "$WAN_VAE_PATH"
   require_file "$TOML_FILE"
-  require_file "examples/launch_sft_action_policy_robolabsim_ur5_eef.sh"
+  require_file "examples/launch_sft_action_policy_ur5_single_eef.sh"
 }
 
 validate_dataset_metadata() {
@@ -409,6 +408,8 @@ for key, shape in expected_shapes.items():
     actual = features.get(key, {}).get("shape")
     if actual != shape:
         errors.append(f"{key} shape={actual!r}, expected {shape!r}")
+if features.get("action.tool0_pose", {}).get("names") != ["x", "y", "z", "qw", "qx", "qy", "qz"]:
+    errors.append("action.tool0_pose must explicitly declare xyz+wxyz ordering")
 for key in (
     "observation.images.wrist_cam",
     "observation.images.over_shoulder_left_camera",
@@ -430,7 +431,7 @@ print(
 )
 print(
     "RoboLabSim action contract:",
-    "observation.ee_position/orientation adjacent deltas + action gripper -> standard SE(3) delta action[10]",
+    "action.tool0_pose[t..t+32] (xyz+wxyz) adjacent deltas + action[t+1..t+32,6] -> SE(3) delta action[10]",
 )
 print(
     "RoboLabSim canvas contract:",
@@ -541,7 +542,7 @@ log_effective_plan() {
   log "  BASE_CHECKPOINT_PATH=$BASE_CHECKPOINT_PATH"
   log "  WAN_VAE_PATH=$WAN_VAE_PATH"
   log "  OUTPUT_ROOT=$OUTPUT_ROOT"
-  log "  ACTION_CONTRACT=observation EEF adjacent deltas + action gripper -> standard SE(3) delta action[10]"
+  log "  ACTION_CONTRACT=tool0 pose[t..t+32] xyz+wxyz deltas + close_fraction[t+1..t+32] -> action[10]"
   log "  CANVAS_CONTRACT=top=wrist_cam bottom-left=over_shoulder_left_camera bottom-right=over_shoulder_right_camera"
   log "  EXTRA_TAIL_OVERRIDES=$EXTRA_TAIL_OVERRIDES"
 }
@@ -583,6 +584,7 @@ run_dryrun() {
   log "Running direct config dryrun before torchrun."
   IMAGINAIRE_OUTPUT_ROOT="$OUTPUT_ROOT/dryrun_${JOB_NAME}" \
   ROBOLABSIM_UR5_ROOT="$ROBOLABSIM_UR5_ROOT" \
+  UR5_SINGLE_EEF_ROOT="$ROBOLABSIM_UR5_ROOT" \
   BASE_CHECKPOINT_PATH="$BASE_CHECKPOINT_PATH" \
   WAN_VAE_PATH="$WAN_VAE_PATH" \
   python -m cosmos_framework.scripts.train \
@@ -593,6 +595,7 @@ run_dryrun() {
 
 launch_training() {
   export DATASET_PATH ROBOLABSIM_UR5_ROOT BASE_CHECKPOINT_PATH WAN_VAE_PATH
+  export UR5_SINGLE_EEF_ROOT="$ROBOLABSIM_UR5_ROOT"
   export OUTPUT_ROOT IMAGINAIRE_OUTPUT_ROOT LOG_FILENAME
   if [[ -n "${MLP_LOG_PATH:-}" ]]; then
     mkdir -p "$MLP_LOG_PATH"
@@ -611,7 +614,7 @@ launch_training() {
   log "OUTPUT_ROOT=$OUTPUT_ROOT"
   log "MLP_TRAIN_LOG=${MLP_TRAIN_LOG:-<unset>}"
   log "EXTRA_TAIL_OVERRIDES=$EXTRA_TAIL_OVERRIDES"
-  bash examples/launch_sft_action_policy_robolabsim_ur5_eef.sh
+  bash examples/launch_sft_action_policy_ur5_single_eef.sh
 }
 
 main() {

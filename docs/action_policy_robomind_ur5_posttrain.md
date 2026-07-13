@@ -9,9 +9,9 @@ Berkeley AUTOLab UR5 is now a separate **Case A** EEF-space path with its own da
 | item | value |
 | --- | --- |
 | dataset | RoboMIND 1.0 UR subset converted to LeRobot |
-| expected path | `/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5` |
+| expected path | `/mlp_vepfs/share/swy/cosmos3-framework/lerobot/robomind1-ur5-joint` |
 | action | **7D** `[joint(6), gripper(1)]` absolute UR joint targets |
-| domain | `robomind-ur5-single` |
+| domain | `ur5-single-joint` |
 | experiment | `action_policy_robomind_ur5_single_nano` |
 | recipe TOML | `examples/toml/sft_config/action_policy_robomind_ur5_single_repro.toml` |
 | launcher | `examples/launch_sft_action_policy_robomind_ur5_single.sh` |
@@ -23,7 +23,7 @@ The 7D joint head is fresh. Do not reuse DROID's 8D Franka joint head.
 RoboMIND1-UR LeRobot data is expected under the fast-disk LeRobot area:
 
 ```bash
-export DATASET_PATH=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5
+export DATASET_PATH=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/robomind1-ur5-joint
 export UR5_SINGLE_ROOT=$DATASET_PATH
 ```
 
@@ -31,9 +31,11 @@ The launcher default is already set to this path, but exporting the variables ke
 
 ## Required Dataset Schema
 
-The RoboMIND joint reader now requires split joint/gripper fields. It does not accept anonymous generic LeRobot `action` datasets.
+The source-neutral UR5 reader accepts either one packed 7D action field or
+explicit split joint/gripper fields. The training TOML must describe the exact
+storage mapping; filenames and polarity are not inferred from a dataset name.
 
-Expected single-arm split fields:
+This RoboMIND recipe declares the following split fields:
 
 ```text
 action.arm_left_joint               # shape [6]
@@ -43,7 +45,9 @@ observation.state.gripper_left       # shape [1] or scalar
 observation.images.camera_top        # at least one camera is required
 ```
 
-Additional cameras are accepted. Missing views are zero-padded into the fixed three-view canvas.
+Other sources may declare different feature names or a packed `action` field in
+their own `[[action_policy.datasets]]` entry. Missing camera roles follow the
+manifest's explicit `missing_view_policy`.
 
 ## Canvas Policy
 
@@ -65,7 +69,7 @@ source /root/.bashrc
 cosmos3-activate
 export LD_LIBRARY_PATH=
 
-export DATASET_PATH=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5
+export DATASET_PATH=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/robomind1-ur5-joint
 export UR5_SINGLE_ROOT=$DATASET_PATH
 export BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
 export WAN_VAE_PATH=<Wan2.2_VAE.pth>
@@ -105,7 +109,11 @@ RoboLab joint-space deployment is direct:
 model 7D output -> UR5 joint targets + gripper scalar -> RoboLab client
 ```
 
-No IK is needed. Still verify joint ordering, units, and gripper polarity against the RoboLab client before evaluation.
+No IK is needed. Joint order and canonical `close_fraction` gripper semantics
+are checked against the client capability during the server handshake.
+RoboLab evaluation must run `policies/cosmos3/run_ur5.py` with
+`--camera-preset robomind_single`, which maps the overhead camera and generates
+the two black auxiliary views declared by this recipe.
 
 ## Separate Berkeley EEF Path
 
@@ -120,7 +128,8 @@ That path converts Berkeley `action[7]` delta-RPY into a 10D EEF delta action. L
 
 ## Code Pointers
 
-- Joint dataset: `cosmos_framework/data/generator/action/datasets/robomind_ur5_dataset.py`
+- Single-arm joint dataset: `cosmos_framework/data/generator/action/datasets/ur5_single_lerobot_dataset.py`
+- Legacy dual-arm joint dataset: `cosmos_framework/data/generator/action/datasets/robomind_ur5_dataset.py`
 - Berkeley EEF dataset: `cosmos_framework/data/generator/action/datasets/berkeley_ur5_eef_dataset.py`
 - Canvas helper: `cosmos_framework/data/generator/action/datasets/canvas_utils.py`
 - Joint experiment: `cosmos_framework/configs/base/experiment/action/posttrain_config/action_policy_robomind_ur5_single_nano.py`

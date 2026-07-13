@@ -26,6 +26,9 @@
 #                        has no torchrun env fallback, so it must be passed here).
 #   PYTHON_BIN           Python interpreter for distributed launch; default resolves
 #                        from PATH after the caller activates its environment.
+#   ADOPT_LEGACY_ACTION_POLICY_MANIFEST
+#                        Set to 1 exactly once to bind an audited TOML manifest to
+#                        a pre-manifest run that already contains checkpoints.
 #   LOG_FILENAME         override $LOG_DIR/${LOG_FILENAME}
 #                        (default <toml-stem>_sft.log).
 #
@@ -92,6 +95,11 @@ echo ">>> $(date '+%H:%M:%S') python:     $PYTHON_BIN"
 # Default empty if caller didn't set; safe under set -u.
 [[ ${TAIL_OVERRIDES+x} ]] || TAIL_OVERRIDES=()
 
+TRAIN_ARGS=()
+if [[ "${ADOPT_LEGACY_ACTION_POLICY_MANIFEST:-0}" == "1" ]]; then
+    TRAIN_ARGS+=(--adopt-legacy-action-policy-manifest)
+fi
+
 TRAILING_ARGS=()
 if (( ${#TAIL_OVERRIDES[@]} > 0 )); then
     TRAILING_ARGS=(-- "${TAIL_OVERRIDES[@]}")
@@ -113,6 +121,7 @@ fi
 IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
     "$PYTHON_BIN" -m torch.distributed.run "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
     --sft-toml="$TOML_FILE" \
+    "${TRAIN_ARGS[@]}" \
     "${TRAILING_ARGS[@]}" \
     2>&1 | tee "${TEE_TARGETS[@]}"
 
