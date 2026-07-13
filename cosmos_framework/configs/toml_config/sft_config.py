@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 import tomllib
+from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field
 
 from cosmos_framework.configs.toml_config.toml_config_helper import (
     TASK_TO_BASE_CONFIG,
     build_hydra_overrides,
 )
+from cosmos_framework.data.generator.action.policy_schema import ActionPolicyManifest
 
 # Common config for every model in this file:
 # - ``extra="forbid"``        → unknown TOML keys raise ValidationError (typo guard).
@@ -297,6 +299,14 @@ class BackboneConfig(BaseModel):
     )
 
 
+class RectifiedFlowTrainingConfig(BaseModel):
+    """Small structured-TOML surface for VFM flow-loss weighting."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    loss_scale: float = Field(default=1.0, gt=0.0)
+
+
 class ModelConfig(BaseModel):
     """Top-level model knobs.
 
@@ -357,8 +367,7 @@ class ModelConfig(BaseModel):
     lora_rank: int = Field(
         default=16,
         description=(
-            "LoRA rank `r`. Adapter shape is (rank × hidden_dim) per target "
-            "module. Standard values are 4, 8, 16, 32."
+            "LoRA rank `r`. Adapter shape is (rank × hidden_dim) per target module. Standard values are 4, 8, 16, 32."
         ),
     )
     lora_alpha: int = Field(
@@ -379,11 +388,10 @@ class ModelConfig(BaseModel):
     ema: EMAConfig = Field(default_factory=EMAConfig)
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
     compile: CompileConfig = Field(default_factory=CompileConfig)
-    activation_checkpointing: ActivationCheckpointingConfig = Field(
-        default_factory=ActivationCheckpointingConfig
-    )
+    activation_checkpointing: ActivationCheckpointingConfig = Field(default_factory=ActivationCheckpointingConfig)
     tokenizer: ModelTokenizerConfig = Field(default_factory=ModelTokenizerConfig)
     backbone: BackboneConfig = Field(default_factory=BackboneConfig)
+    rectified_flow_training_config: RectifiedFlowTrainingConfig = Field(default_factory=RectifiedFlowTrainingConfig)
 
 
 # ---------------------------------------------------------------- optimizer
@@ -473,15 +481,12 @@ class SchedulerConfig(BaseModel):
     )
     f_start: list[float] = Field(
         default_factory=lambda: [1.0e-6],
-        description=(
-            "Initial LR multiplier at step 0, before warmup ramps up."
-        ),
+        description=("Initial LR multiplier at step 0, before warmup ramps up."),
     )
     verbosity_interval: int = Field(
         default=0,
         description=(
-            "How often the scheduler logs the current LR (in optimizer "
-            "steps). 0 = silent. VFM only — skipped on VLM."
+            "How often the scheduler logs the current LR (in optimizer steps). 0 = silent. VFM only — skipped on VLM."
         ),
     )
     warm_up_steps: list[int] = Field(
@@ -533,8 +538,7 @@ class GradClipCallback(BaseModel):
     clip_norm: float = Field(
         default=1.0,
         description=(
-            "Maximum global L2 norm of the gradient. Steps with a larger "
-            "norm are rescaled so ||grad|| ≤ clip_norm."
+            "Maximum global L2 norm of the gradient. Steps with a larger norm are rescaled so ||grad|| ≤ clip_norm."
         ),
     )
     force_finite: bool = Field(
@@ -567,8 +571,7 @@ class TrainerConfig(BaseModel):
     distributed_parallelism: str = Field(
         default="fsdp",
         description=(
-            "Distributed strategy. 'fsdp' (the only supported value today) "
-            "routes through cosmos's FSDP wrapper."
+            "Distributed strategy. 'fsdp' (the only supported value today) routes through cosmos's FSDP wrapper."
         ),
     )
     grad_accum_iter: int = Field(
@@ -621,6 +624,16 @@ class CheckpointConfig(BaseModel):
 
 
 # ---------------------------------------------------------------- dataloader_train
+class NestedDataloaderConfig(BaseModel):
+    """Runtime knobs on an experiment-owned nested DataLoader LazyCall."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    num_workers: int = Field(default=4, ge=0)
+    batch_size: int = Field(default=1, gt=0)
+    prefetch_factor: Optional[int] = Field(default=2, gt=0)
+
+
 class DataloaderTrainConfig(BaseModel):
     """Top-level dataloader scalars only. The dataloader's class (LazyCall)
     and full pipeline wiring (datasets, packers, …) stay in the experiment
@@ -658,11 +671,9 @@ class DataloaderTrainConfig(BaseModel):
     )
     seed: int = Field(
         default=42,
-        description=(
-            "Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has "
-            "no seed ctor kwarg there)."
-        ),
+        description=("Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has no seed ctor kwarg there)."),
     )
+    dataloader: NestedDataloaderConfig = Field(default_factory=NestedDataloaderConfig)
 
 
 # ---------------------------------------------------------------- top
@@ -680,6 +691,13 @@ class SFTExperimentConfig(BaseModel):
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     dataloader_train: DataloaderTrainConfig = Field(default_factory=DataloaderTrainConfig)
+    action_policy: Optional["ActionPolicyManifest"] = Field(
+        default=None,
+        description=(
+            "Versioned action/model/observation/dataset contract. Required by action-policy "
+            "recipes and persisted once at the run root for serving."
+        ),
+    )
     custom: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -746,8 +764,7 @@ def load_experiment_from_toml(
         base_config_path = TASK_TO_BASE_CONFIG[task]
     except KeyError as e:
         raise ValueError(
-            f"{toml_path}: [job].task={task!r} is not supported. "
-            f"Valid values: {sorted(TASK_TO_BASE_CONFIG)}"
+            f"{toml_path}: [job].task={task!r} is not supported. Valid values: {sorted(TASK_TO_BASE_CONFIG)}"
         ) from e
 
     overrides = build_hydra_overrides(raw)
@@ -759,10 +776,7 @@ def load_experiment_from_toml(
             if not o or o == "--":
                 continue
             if "=" not in o:
-                raise ValueError(
-                    f"extra override {o!r} must be Hydra dotted-path syntax "
-                    f"(e.g. 'optimizer.lr=1e-5')."
-                )
+                raise ValueError(f"extra override {o!r} must be Hydra dotted-path syntax (e.g. 'optimizer.lr=1e-5').")
             overrides.append(o)
 
     # Import lazily so this module stays cheap to import in non-training contexts.
@@ -774,4 +788,27 @@ def load_experiment_from_toml(
     # schema so the framework-owned hydra configs stay untouched; lands as a
     # plain dict reachable via config.custom.
     config.custom = raw.get("custom", {})
+    if cfg.action_policy is not None:
+        resolved_policy = OmegaConf.to_container(
+            OmegaConf.create(cfg.action_policy.model_dump(mode="json")), resolve=True
+        )
+        from cosmos_framework.data.generator.action.policy_schema import (
+            bind_manifest_to_training_config,
+            coerce_action_policy_manifest,
+        )
+
+        manifest = coerce_action_policy_manifest(resolved_policy)
+        config.action_policy = manifest.model_dump(mode="json")
+        bind_manifest_to_training_config(config, manifest)
+    elif getattr(config, "action_policy", None) is not None:
+        # Experiment-owned defaults remain supported, but pass through the
+        # same strict schema before they can become an artifact contract.
+        from cosmos_framework.data.generator.action.policy_schema import (
+            bind_manifest_to_training_config,
+            coerce_action_policy_manifest,
+        )
+
+        manifest = coerce_action_policy_manifest(config.action_policy)
+        config.action_policy = manifest.model_dump(mode="json")
+        bind_manifest_to_training_config(config, manifest)
     return config

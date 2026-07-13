@@ -31,7 +31,11 @@ from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
     ActionSFTDataset,
 )
 from cosmos_framework.data.generator.action.datasets.base_dataset import ActionBaseDataset
-from cosmos_framework.data.generator.action.datasets.canvas_utils import concat_three_view_canvas, zero_like_view
+from cosmos_framework.data.generator.action.datasets.canvas_utils import (
+    concat_three_view_canvas,
+    resize_view,
+    zero_like_view,
+)
 from cosmos_framework.data.generator.action.pose_utils import build_abs_pose_from_components, pose_abs_to_rel
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
 
@@ -48,6 +52,11 @@ _NATIVE_ACTION_DIM = 7
 _STATE_DIM = 8
 _EEF_ACTION_DIM = 10
 _INVALID_FRAME_RE = re.compile(r"Invalid frame index=\d+.*must be less than (\d+)")
+BERKELEY_CONCAT_VIEW_DESCRIPTION = (
+    "The top row is the wrist camera. "
+    "The bottom-left row is the external Berkeley UR5 camera; "
+    "the bottom-right row is a zero-padded missing view."
+)
 
 
 def _strided_window_counts(ep_counts: np.ndarray, chunk_length: int, sample_stride: int) -> np.ndarray:
@@ -95,13 +104,21 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
         tolerance_s: float = 2e-4,
         viewpoint: Viewpoint = "concat_view",
         canvas_views: tuple[str, ...] | None = None,
+        decode_size_hw: tuple[int, int] | None = (360, 640),
         gripper_invert: bool = False,
         action_normalization: str | None = None,
         sample_stride: int = 1,
+        view_description: str = BERKELEY_CONCAT_VIEW_DESCRIPTION,
     ) -> None:
         if viewpoint != "concat_view":
             raise NotImplementedError("BerkeleyUR5EEFDataset only supports concat_view.")
+        if decode_size_hw is not None and any(value <= 0 for value in decode_size_hw):
+            raise ValueError(f"decode_size_hw values must be positive, got {decode_size_hw!r}.")
+        self._decode_size_hw = decode_size_hw
         self._gripper_invert = bool(gripper_invert)
+        if not view_description.strip():
+            raise ValueError("Berkeley view_description must not be empty.")
+        self._view_description = view_description
         super().__init__(
             root=root,
             domain_name="berkeley-ur5-eef",
@@ -167,11 +184,7 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
             video=video,
             action=raw_action,
             ai_caption=ai_caption,
-            additional_view_description=(
-                "The top row is the wrist camera. "
-                "The bottom-left row is the external Berkeley UR5 camera; "
-                "the bottom-right row is a zero-padded missing view."
-            ),
+            additional_view_description=self._view_description,
         )
 
     def _resolve_canvas(self, canvas_views: tuple[str, ...] | None) -> list[str]:
@@ -224,9 +237,12 @@ class BerkeleyUR5EEFDataset(ActionBaseDataset):
     def _load_concat_video(self, episode: dict[str, Any], observation_rows: list[dict[str, Any]]) -> torch.Tensor:
         timestamps = [float(row["timestamp"]) for row in observation_rows]
         frames = [
-            self._decode_video_frames_safe(
-                self._video_path(episode, feat),
-                [float(episode.get(f"videos/{feat}/from_timestamp", 0.0)) + ts for ts in timestamps],
+            resize_view(
+                self._decode_video_frames_safe(
+                    self._video_path(episode, feat),
+                    [float(episode.get(f"videos/{feat}/from_timestamp", 0.0)) + ts for ts in timestamps],
+                ),
+                self._decode_size_hw,
             )
             for feat in self._canvas_features
         ]
@@ -273,18 +289,22 @@ def get_action_berkeley_ur5_eef_sft_dataset(
     mode: str = "policy",
     gripper_invert: bool = False,
     canvas_views: tuple[str, ...] | None = None,
+    decode_size_hw: tuple[int, int] | None = (360, 640),
     action_normalization: str | None = None,
     viewpoint: str = "concat_view",
     resolution: str | int = "480",
     max_action_dim: int = 64,
     tokenizer_config: dict | None = None,
     cfg_dropout_rate: float = 0.1,
+    action_channel_masking: bool = True,
     append_viewpoint_info: bool = True,
     append_duration_fps_timestamps: bool = True,
     append_resolution_info: bool = True,
     append_idle_frames: bool = False,
+    format_prompt_as_json: bool = False,
     iterable_shuffle: bool = False,
     episode_shuffle_seed: int = 42,
+    view_description: str = BERKELEY_CONCAT_VIEW_DESCRIPTION,
 ) -> ActionSFTDataset | ActionIterableShuffleDataset:
     """Build the Berkeley AUTOLab UR5 EEF-space action SFT dataset."""
     dataset = BerkeleyUR5EEFDataset(
@@ -295,18 +315,84 @@ def get_action_berkeley_ur5_eef_sft_dataset(
         viewpoint=viewpoint,
         gripper_invert=gripper_invert,
         canvas_views=canvas_views,
+        decode_size_hw=decode_size_hw,
         action_normalization=action_normalization,
+        view_description=view_description,
     )
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         max_action_dim=max_action_dim,
+        action_channel_masking=action_channel_masking,
         append_viewpoint_info=append_viewpoint_info,
         append_duration_fps_timestamps=append_duration_fps_timestamps,
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
     )
     sft = ActionSFTDataset(dataset, transform, resolution)
     if iterable_shuffle:
         return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
     return sft
+
+
+def _validate_berkeley_action_policy_manifest(dataset_config: Any, manifest: Any) -> None:
+    """Bind the dedicated Berkeley adapter's fixed action/canvas semantics."""
+
+    if len(manifest.datasets) != 1:
+        raise ValueError("The dedicated Berkeley adapter requires exactly one dataset source")
+    source = manifest.datasets[0]
+    expected = {
+        "robot": "ur5",
+        "domain_name": "berkeley-ur5-eef",
+        "model_codec": "eef_delta",
+        "model_frame": "berkeley_tcp",
+        "wire_frame": "berkeley_tcp",
+        "source_name": "berkeley_autolab_ur5",
+        "condition_source": "none",
+        "action_features": (_STATE_FEATURE, _ACTION_FEATURE),
+        "state_features": (),
+        "camera_features": {"primary": _WRIST_VIEW, "aux_left": _EXTERNAL_VIEW},
+        "source_layout": manifest.model_action.layout,
+        "source_gripper": "close_fraction",
+        "layout_id": "primary_top_aux_bottom_pair_right_missing",
+        "view_shape_hw": (360, 640),
+        "canvas_shape_hw": (540, 640),
+        "view_roles": ("primary", "aux_left", "aux_right"),
+        "missing_view_policy": "black",
+    }
+    actual = {
+        "robot": manifest.robot,
+        "domain_name": manifest.domain_name,
+        "model_codec": manifest.model_action.codec,
+        "model_frame": manifest.model_action.frame,
+        "wire_frame": manifest.wire_action.frame,
+        "source_name": source.name,
+        "condition_source": source.condition_source,
+        "action_features": source.action_features,
+        "state_features": source.state_features,
+        "camera_features": source.camera_features,
+        "source_layout": source.action_layout,
+        "source_gripper": source.gripper_semantics,
+        "layout_id": manifest.observation.layout_id,
+        "view_shape_hw": manifest.observation.view_shape_hw,
+        "canvas_shape_hw": manifest.observation.canvas_shape_hw,
+        "view_roles": manifest.observation.view_roles,
+        "missing_view_policy": manifest.observation.missing_view_policy,
+    }
+    differences = [
+        f"{key}: adapter={value!r}, manifest={actual[key]!r}" for key, value in expected.items() if actual[key] != value
+    ]
+    if getattr(dataset_config, "view_description", None) != source.view_description:
+        differences.append("resolved Berkeley view_description must equal the manifest dataset source")
+    if differences:
+        raise ValueError(
+            "Berkeley action-policy manifest does not match the dataset adapter: " + "; ".join(differences)
+        )
+
+
+setattr(
+    get_action_berkeley_ur5_eef_sft_dataset,
+    "action_policy_manifest_validator",
+    _validate_berkeley_action_policy_manifest,
+)

@@ -7,7 +7,7 @@
 # dataset knobs) live in the registered experiment; this file sets run-level scalars.
 #
 # Env required:
-#   UR5_SINGLE_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5  # RoboMIND 1.0 UR -> LeRobot
+#   UR5_SINGLE_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/robomind1-ur5-joint
 #   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>                   # convert_model_to_dcp; see docs
 #   WAN_VAE_PATH=<Wan2.2_VAE.pth>
 #   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root                  # persist checkpoints
@@ -45,6 +45,72 @@ logging_iter = 50
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter = 1000
+
+[action_policy]
+schema_version = 1
+profile_id      = "robomind_ur5_single_joint_15hz_c32"
+robot           = "ur5"
+domain_name     = "ur5-single-joint"
+policy_fps      = 15
+chunk_size      = 32
+
+[action_policy.model_action]
+codec          = "joint_position"
+layout         = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3", "gripper"]
+representation = "absolute"
+
+[action_policy.model_action.gripper]
+index     = 6
+semantics = "close_fraction"
+
+[action_policy.wire_action]
+codec          = "joint_position"
+layout         = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3", "gripper"]
+representation = "absolute"
+
+[action_policy.wire_action.gripper]
+index     = 6
+semantics = "close_fraction"
+
+[action_policy.conditioning]
+state_rows   = 1
+history_rows = 1
+source       = "current_state"
+timing       = "row 0 is observation state at t0; rows 1..32 are future absolute joint targets"
+
+[action_policy.observation]
+layout_id           = "primary_top_aux_bottom_pair"
+view_shape_hw       = [360, 640]
+canvas_shape_hw     = [540, 640]
+view_roles          = ["primary", "aux_left", "aux_right"]
+missing_view_policy = "black"
+viewpoint            = "concat_view"
+description          = "One primary view fills the top row; two ordered auxiliary slots share the bottom row."
+
+[action_policy.transform]
+resolution                     = "480"
+max_action_dim                 = 64
+action_channel_masking         = true
+append_viewpoint_info          = true
+append_duration_fps_timestamps = true
+append_resolution_info         = true
+append_idle_frames             = false
+format_prompt_as_json          = false
+
+[action_policy.normalization]
+kind = "none"
+
+[[action_policy.datasets]]
+name               = "robomind1_ur5_single"
+root               = "${oc.env:UR5_SINGLE_ROOT}"
+condition_source   = "observation_state_t0"
+action_features    = ["action.arm_left_joint", "action.gripper_left"]
+state_features     = ["observation.state.arm_left_joint", "observation.state.gripper_left"]
+camera_features    = { primary = "observation.images.camera_top" }
+action_layout      = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3", "gripper_close"]
+gripper_semantics  = "close_fraction"
+description        = "RoboMIND1 UR5 single-arm split joint/state storage with one overhead camera and explicit zero-padded auxiliary views."
+view_description   = "The top row is the overhead view of the single-arm UR5 workspace. Both missing bottom auxiliary views are black."
 
 # NOTE: the experiment's lr=2e-4 is tuned for the ~8192 global batch of the full multi-node shape
 # (max_samples_per_batch=128 x 64 ranks). This single-node TOML (shard 8 / replicate 1) gives a

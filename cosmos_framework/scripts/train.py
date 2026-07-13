@@ -30,15 +30,15 @@ import traceback
 import torch
 from loguru import logger as logging
 
-from cosmos_framework.utils.config import Config
-from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
-from cosmos_framework.utils.serialization import to_yaml
+from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
+from cosmos_framework.data.generator.action.policy_schema import persist_run_action_policy
 from cosmos_framework.utils import distributed
+from cosmos_framework.utils.config import Config
 from cosmos_framework.utils.context_managers import data_loader_init, distributed_init, model_init
 from cosmos_framework.utils.launch import log_reproducible_setup
+from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
+from cosmos_framework.utils.serialization import to_yaml
 from cosmos_framework.utils.training_telemetry import telemetry
-from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
-
 
 # ---------------------------------------------------------------------------
 # --deterministic: mirrors launch_vfm.sh determinism settings.
@@ -191,6 +191,22 @@ def launch(config: Config, args: argparse.Namespace) -> None:
     # (imaginaire/trainer.py:125-126 re-applies cudnn from config).
     if args.deterministic:
         _apply_deterministic_config_overrides(config)
+    rank0_error: Exception | None = None
+    policy_error: list[str | None] = [None]
+    if distributed.is_rank0():
+        try:
+            persist_run_action_policy(
+                config,
+                allow_legacy_adoption=args.adopt_legacy_action_policy_manifest,
+            )
+        except Exception as error:
+            rank0_error = error
+            policy_error[0] = f"{type(error).__name__}: {error}"
+    torch.distributed.broadcast_object_list(policy_error, src=0)
+    if policy_error[0] is not None:
+        if rank0_error is not None:
+            raise rank0_error
+        raise RuntimeError(f"Rank 0 rejected the action-policy manifest: {policy_error[0]}")
     # Check that the config is valid
     config.validate()
     # Freeze the config so developers don't change it during training.
@@ -273,6 +289,14 @@ if __name__ == "__main__":
             "`PYTHONHASHSEED=42 torchrun ...`) since Python locks it in at interpreter startup."
         ),
     )
+    parser.add_argument(
+        "--adopt-legacy-action-policy-manifest",
+        action="store_true",
+        help=(
+            "Attach the TOML's explicit [action_policy] manifest to an existing legacy run that already has "
+            "checkpoints but no action_policy.yaml. Use only after auditing that the old checkpoint semantics match."
+        ),
+    )
     args = parser.parse_args()
 
     if args.deterministic:
@@ -285,6 +309,10 @@ if __name__ == "__main__":
     args.config = args.sft_toml
 
     if args.dryrun:
+        persist_run_action_policy(
+            config,
+            allow_legacy_adoption=args.adopt_legacy_action_policy_manifest,
+        )
         logging.info("Config:\n" + config.pretty_print(use_color=True))
         os.makedirs(config.job.path_local, exist_ok=True)
         try:

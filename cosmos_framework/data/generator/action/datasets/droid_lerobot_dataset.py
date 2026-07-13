@@ -32,8 +32,8 @@ from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset_confi
     HAS_MULTI_LANGUAGE_ANNOTATIONS,
     IMAGE_FEATURES,
     IS_FLAT_ACTION,
-    IS_GRIPPER_ACTION_FLIPPED,
     LEROBOT_ROOTS,
+    SOURCE_GRIPPER_SEMANTICS,
     STATE_FEATURES,
 )
 from cosmos_framework.data.generator.action.pose_utils import (
@@ -46,6 +46,11 @@ from cosmos_framework.data.generator.action.viewpoint_utils import Viewpoint
 from cosmos_framework.utils import log
 
 _FILTER_DICT_PATH = "/scratch/fsw/portfolios/cosmos/projects/cosmos_base_training/users/haolia/workspace/droid_oss_inputs/keep_ranges_1_0_1.json"
+DROID_CONCAT_VIEW_DESCRIPTION = (
+    "The top row is from the wrist-mounted camera. "
+    "The bottom row contains two horizontally concatenated third-person perspective views of the scene "
+    "from opposite sides, with the robot visible."
+)
 
 # 90-degree clockwise rotation about the Z axis (in local frame), converting
 # DROID Franka panda_link8 orientation to the OpenCV camera convention.
@@ -84,6 +89,8 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         enable_fast_init: bool = False,
         max_num_history_actions: int = 0,
         use_image_augmentation: bool = False,
+        dataset_profile: str | None = None,
+        view_description: str = DROID_CONCAT_VIEW_DESCRIPTION,
     ) -> None:
         """ """
         super().__init__(
@@ -109,6 +116,9 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         self._filter_dict_path = filter_dict_path or _FILTER_DICT_PATH
         self._max_num_history_actions = max_num_history_actions
         self._use_image_augmentation = use_image_augmentation
+        if not view_description.strip():
+            raise ValueError("DROID view_description must not be empty.")
+        self._view_description = view_description
         if max_num_history_actions > 0 and action_space not in ("midtrain", "joint_pos"):
             raise ValueError(
                 f"max_num_history_actions is only supported with action_space='midtrain' or 'joint_pos', got {action_space!r}"
@@ -117,7 +127,9 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         self._is_val_temp_seg = split == "val_temp_seg"
         self._to_opencv = _DROID_TO_OPENCV
 
-        version = os.path.basename(root)
+        # Canonical recipes name the storage schema explicitly. Basename
+        # fallback preserves old internal roots without making it artifact truth.
+        version = dataset_profile or os.path.basename(root)
         try:
             lerobot_roots = LEROBOT_ROOTS[version]
             self._image_features = IMAGE_FEATURES[version]
@@ -125,9 +137,9 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             self._action_features = ACTION_FEATURES[version]
             self._is_flat_action = IS_FLAT_ACTION[version]
             self._has_multi_language_annotations = HAS_MULTI_LANGUAGE_ANNOTATIONS[version]
-            self._is_gripper_action_flipped = IS_GRIPPER_ACTION_FLIPPED[version]
+            self._source_gripper_semantics = SOURCE_GRIPPER_SEMANTICS[version]
         except KeyError as e:
-            raise ValueError(f"Unknown version: {version!r}. Supported: {list(LEROBOT_ROOTS.keys())}") from e
+            raise ValueError(f"Unknown DROID dataset profile: {version!r}. Supported: {list(LEROBOT_ROOTS)}") from e
 
         if self._use_success_only and lerobot_roots:
             lerobot_roots = [x for x in lerobot_roots if x.split("/", 1)[0] == "success"]
@@ -223,6 +235,14 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         if self._is_val_temp_seg:
             self._apply_temp_seg_filter()
 
+    def _gripper_to_model_semantics(self, value: torch.Tensor) -> torch.Tensor:
+        """Convert the profile's source value to released-model open_fraction."""
+        if self._source_gripper_semantics == "open_fraction":
+            return value
+        if self._source_gripper_semantics == "close_fraction":
+            return 1.0 - value
+        raise ValueError(f"Unsupported DROID source gripper semantics: {self._source_gripper_semantics!r}")
+
     def _apply_temp_seg_filter(self) -> None:
         """Replace index records with one high-scoring segment per episode.
 
@@ -250,6 +270,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             states = torch.tensor(np.array(episode_data[self._state_features]))  # [N,state_dim]
 
             gripper_action = actions[:, 6] if self._is_flat_action else actions  # [N]
+            gripper_action = self._gripper_to_model_semantics(gripper_action)
             ee_pos = states[:, :3]  # [N,3]
             ee_disp = (ee_pos[1:] - ee_pos[:-1]).norm(dim=-1)  # [N-1]
 
@@ -389,8 +410,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
                 if self._is_flat_action
                 else sample[self._action_features].unsqueeze(-1)
             )
-            if self._is_gripper_action_flipped:
-                gripper = 1.0 - gripper
+            gripper = self._gripper_to_model_semantics(gripper)
             action = torch.from_numpy(
                 np.concatenate([poses_rel[-self._chunk_length :], gripper[-self._chunk_length :]], axis=-1)
             ).float()  # [T,10]
@@ -415,8 +435,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
                     extras["history_action"] = hist_action_raw
             if self._use_state:
                 initial_gripper = sample[_GRIPPER_STATE_FEATURE][0].unsqueeze(-1)
-                if self._is_gripper_action_flipped:
-                    initial_gripper = 1.0 - initial_gripper
+                initial_gripper = self._gripper_to_model_semantics(initial_gripper)
                 initial_rot6d = convert_rotation(poses_abs[-self._chunk_length - 1, :3, :3], "matrix", "rot6d")
                 initial_state = torch.from_numpy(
                     np.concatenate((poses_abs[-self._chunk_length - 1, :3, 3], initial_rot6d, initial_gripper), axis=-1)
@@ -429,23 +448,20 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             pose[:, :3, 3] = state[:, 0:3]
             pose_delta = np.linalg.inv(pose[0]) @ pose[1:]
             gripper = sample[self._action_features].unsqueeze(-1)
-            if self._is_gripper_action_flipped:
-                gripper = 1.0 - gripper
+            gripper = self._gripper_to_model_semantics(gripper)
             action = torch.from_numpy(
                 np.concatenate((pose_delta[:, :3, 3], pose_delta[:, :3, 0], pose_delta[:, :3, 1], gripper), axis=-1)
             ).float()
             if self._use_state:
                 initial_gripper = sample[_GRIPPER_STATE_FEATURE][0].unsqueeze(-1)
-                if self._is_gripper_action_flipped:
-                    initial_gripper = 1.0 - initial_gripper
+                initial_gripper = self._gripper_to_model_semantics(initial_gripper)
                 initial_state = torch.from_numpy(
                     np.concatenate((pose[0, :3, 3], pose[0, :3, 0], pose[0, :3, 1], initial_gripper), axis=-1)
                 ).float()
                 action = torch.cat([initial_state.unsqueeze(0), action], dim=0)
         if self._action_space == "joint_pos":
             gripper = sample[self._action_features][-self._chunk_length :].unsqueeze(-1)
-            if self._is_gripper_action_flipped:
-                gripper = 1.0 - gripper
+            gripper = self._gripper_to_model_semantics(gripper)
             action = torch.cat((sample[_JOINT_ACTION_FEATURE], gripper), dim=-1).float()
             if self._max_num_history_actions > 0:
                 _, _, _, frame_offset = self._resolve_index(int(idx))
@@ -460,14 +476,12 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
                     hist_gripper = sample[_GRIPPER_STATE_FEATURE][
                         -self._chunk_length - 1 - actual_h : -self._chunk_length - 1
                     ].unsqueeze(-1)
-                    if self._is_gripper_action_flipped:
-                        hist_gripper = 1.0 - hist_gripper
+                    hist_gripper = self._gripper_to_model_semantics(hist_gripper)
                     hist_action_raw = torch.cat((hist_joint, hist_gripper), dim=-1).float()
                     extras["history_action"] = hist_action_raw  # [H,D]
             if self._use_state:
                 initial_gripper = sample[_GRIPPER_STATE_FEATURE][-self._chunk_length - 1].unsqueeze(-1)
-                if self._is_gripper_action_flipped:
-                    initial_gripper = 1.0 - initial_gripper
+                initial_gripper = self._gripper_to_model_semantics(initial_gripper)
                 initial_state = torch.cat(
                     (sample[_JOINT_STATE_FEATURE][-self._chunk_length - 1], initial_gripper), dim=-1
                 ).float()
@@ -478,10 +492,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             "wrist_left_exterior",
             "wrist_both_exterior",
         ):
-            extras["additional_view_description"] = (
-                "The top row is from the wrist-mounted camera. "
-                "The bottom row contains two horizontally concatenated third-person perspective views of the scene from opposite sides, with the robot visible."
-            )
+            extras["additional_view_description"] = self._view_description
 
         return self._build_result(
             mode=mode,

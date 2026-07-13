@@ -20,7 +20,17 @@ from typing import Any
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset import (
+    DROID_CONCAT_VIEW_DESCRIPTION,
     DROIDLeRobotDataset,
+)
+from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset_config import (
+    _GRIPPER_STATE_FEATURE,
+    _JOINT_ACTION_FEATURE,
+    _JOINT_STATE_FEATURE,
+    ACTION_FEATURES,
+    COSMOS3_DROID_SUCCESS_PROFILE,
+    IMAGE_FEATURES,
+    SOURCE_GRIPPER_SEMANTICS,
 )
 from cosmos_framework.data.generator.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
@@ -39,7 +49,10 @@ class ActionSFTDataset(Dataset):
         return len(self._dataset)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        return self._transform(self._dataset[idx], self._resolution)
+        sample = self._dataset[idx]
+        get_normalizer = getattr(self._dataset, "get_action_normalizer", None)
+        action_normalizer = get_normalizer(sample) if callable(get_normalizer) else None
+        return self._transform(sample, self._resolution, action_normalizer=action_normalizer)
 
     def get_shuffle_blocks(self):
         """Delegate to the inner DROIDLeRobotDataset (per-episode/segment flat-index blocks)."""
@@ -107,6 +120,7 @@ def get_action_droid_sft_dataset(
     max_action_dim: int = 64,
     tokenizer_config: dict | None = None,
     cfg_dropout_rate: float = 0.1,
+    action_channel_masking: bool = True,
     append_viewpoint_info: bool = True,
     append_duration_fps_timestamps: bool = True,
     append_resolution_info: bool = True,
@@ -115,6 +129,8 @@ def get_action_droid_sft_dataset(
     iterable_shuffle: bool = False,
     episode_shuffle_seed: int = 42,
     use_success_only: bool = True,
+    dataset_profile: str | None = None,
+    view_description: str = DROID_CONCAT_VIEW_DESCRIPTION,
 ) -> Dataset:
     """Build the DROID action SFT dataset: ``action_space='joint_pos'`` (8D) +
     ``use_state`` (raw/un-normalized), concat_view, chunk_length 32.
@@ -133,12 +149,15 @@ def get_action_droid_sft_dataset(
         use_filter_dict=use_filter_dict,
         filter_dict_path=filter_dict_path,
         use_success_only=use_success_only,
+        dataset_profile=dataset_profile,
+        view_description=view_description,
     )
     dataset: Dataset = DROIDLeRobotDataset(root=root, **shard_kwargs)
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         max_action_dim=max_action_dim,
+        action_channel_masking=action_channel_masking,
         append_viewpoint_info=append_viewpoint_info,
         append_duration_fps_timestamps=append_duration_fps_timestamps,
         append_resolution_info=append_resolution_info,
@@ -149,6 +168,72 @@ def get_action_droid_sft_dataset(
     if iterable_shuffle:
         return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
     return sft
+
+
+def _validate_droid_action_policy_manifest(dataset_config: Any, manifest: Any) -> None:
+    """Bind the dedicated public DROID adapter's fixed semantics to YAML."""
+
+    profile = getattr(dataset_config, "dataset_profile", None)
+    if profile != COSMOS3_DROID_SUCCESS_PROFILE:
+        raise ValueError(
+            f"Manifest-bound DROID training requires the explicit public-success dataset profile, got {profile!r}"
+        )
+    if len(manifest.datasets) != 1:
+        raise ValueError("The dedicated DROID adapter requires exactly one dataset source")
+    source = manifest.datasets[0]
+    images = IMAGE_FEATURES[profile]
+    expected = {
+        "robot": "droid",
+        "domain_name": "droid_lerobot",
+        "model_codec": "joint_position",
+        "model_layout": tuple(f"joint_{index}" for index in range(7)) + ("gripper",),
+        "model_gripper": "open_fraction",
+        "source_name": profile,
+        "condition_source": "observation_state_t0",
+        "action_features": (_JOINT_ACTION_FEATURE, ACTION_FEATURES[profile]),
+        "state_features": (_JOINT_STATE_FEATURE, _GRIPPER_STATE_FEATURE),
+        "camera_features": {
+            "primary": images["wrist"],
+            "aux_left": images["left"],
+            "aux_right": images["right"],
+        },
+        "source_layout": tuple(f"joint_{index}" for index in range(7)) + ("gripper",),
+        "source_gripper": SOURCE_GRIPPER_SEMANTICS[profile],
+        "layout_id": "primary_top_aux_bottom_pair",
+        "view_shape_hw": (360, 640),
+        "canvas_shape_hw": (540, 640),
+        "view_roles": ("primary", "aux_left", "aux_right"),
+        "missing_view_policy": "error",
+    }
+    actual = {
+        "robot": manifest.robot,
+        "domain_name": manifest.domain_name,
+        "model_codec": manifest.model_action.codec,
+        "model_layout": manifest.model_action.layout,
+        "model_gripper": manifest.model_action.gripper.semantics,
+        "source_name": source.name,
+        "condition_source": source.condition_source,
+        "action_features": source.action_features,
+        "state_features": source.state_features,
+        "camera_features": source.camera_features,
+        "source_layout": source.action_layout,
+        "source_gripper": source.gripper_semantics,
+        "layout_id": manifest.observation.layout_id,
+        "view_shape_hw": manifest.observation.view_shape_hw,
+        "canvas_shape_hw": manifest.observation.canvas_shape_hw,
+        "view_roles": manifest.observation.view_roles,
+        "missing_view_policy": manifest.observation.missing_view_policy,
+    }
+    differences = [
+        f"{key}: adapter={value!r}, manifest={actual[key]!r}" for key, value in expected.items() if actual[key] != value
+    ]
+    if getattr(dataset_config, "view_description", None) != source.view_description:
+        differences.append("resolved DROID view_description must equal the manifest dataset source")
+    if differences:
+        raise ValueError("DROID action-policy manifest does not match the dataset adapter: " + "; ".join(differences))
+
+
+setattr(get_action_droid_sft_dataset, "action_policy_manifest_validator", _validate_droid_action_policy_manifest)
 
 
 def get_action_libero_sft_dataset(

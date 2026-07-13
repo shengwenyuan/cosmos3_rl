@@ -24,6 +24,8 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
     # UR5 post-training local additions. High ids stay near the top of the 32-slot range;
     # NVIDIA upstream domains currently use <=20.
     "berkeley-ur5-eef": 29,  # Berkeley AUTOLab UR5, 10D EEF delta pose
+    "ur5-single-eef": 29,  # source-neutral single-arm UR5(e), 10D EEF delta pose
+    "ur5-single-joint": 30,  # source-neutral single-arm UR5(e), 7D joint_pos
     "robomind-ur5-single": 30,  # single-arm UR5e, 7D joint_pos
     "robomind-ur5-dual": 31,  # dual-arm UR5e, 14D joint_pos
 }
@@ -40,6 +42,7 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
     "robomind-franka-dual": 20,
     "robomind-ur": 10,
     "berkeley-ur5-eef": 10,
+    "ur5-single-eef": 10,
     # NOTE: robomind-ur5-single/-dual are intentionally ABSENT here. This dict is the ee_pose /
     # midtrain (cartesian) raw width used only by offline FD/ID inference (inference/action.py)
     "embodiment_b": 30,
@@ -80,4 +83,4 @@ def get_action_dim(embodiment_type: str) -> int:
 def is_valid_domain_name(embodiment_type: str) -> bool:
     """Check if the given embodiment type is recognized."""
     key = embodiment_type.lower().strip()
-    return key in EMBODIMENT_TO_RAW_ACTION_DIM
+    return key in EMBODIMENT_TO_DOMAIN_ID

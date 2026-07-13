@@ -9,6 +9,13 @@ import torch
 import torch.nn.functional as F
 
 
+def resize_view(view: torch.Tensor, size_hw: tuple[int, int] | None) -> torch.Tensor:
+    """Resize a ``[T,C,H,W]`` view when an explicit contract size is set."""
+    if size_hw is None or tuple(view.shape[-2:]) == size_hw:
+        return view
+    return F.interpolate(view, size=size_hw, mode="bilinear", align_corners=False)
+
+
 def zero_like_view(reference: torch.Tensor) -> torch.Tensor:
     """Return a black view with the same shape, dtype, and device as ``reference``."""
     return torch.zeros_like(reference)

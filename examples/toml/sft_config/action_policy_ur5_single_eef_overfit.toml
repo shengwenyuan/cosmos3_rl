@@ -1,0 +1,125 @@
+# Source-neutral UR5 single-arm EEF-delta overfit proof on RoboLabSim.
+
+[job]
+task       = "vfm"
+experiment = "action_policy_ur5_single_eef_nano"
+project    = "cosmos3_action"
+group      = "action_sft"
+name       = "robolabsim_ur5_eef_overfit"
+wandb_mode = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr           = 5.0e-5
+weight_decay = 0.0
+
+[scheduler]
+cycle_lengths = [600]
+f_start       = [0.0]
+f_max         = [0.4]
+f_min         = [0.0]
+warm_up_steps = [20]
+
+[trainer]
+max_iter     = 600
+logging_iter = 10
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 0.5
+force_finite = true
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 200
+
+[dataloader_train]
+max_samples_per_batch = 4
+
+# Artifact contract. The run-root action_policy.yaml is the sole serving truth;
+# the source section also pins the raw EEF encoding and temporal alignment used
+# to construct the model's 10-D delta labels.
+[action_policy]
+schema_version = 1
+profile_id      = "robolabsim_ur5_eef_15hz_c32"
+robot           = "ur5"
+domain_name     = "ur5-single-eef"
+policy_fps      = 15
+chunk_size      = 32
+
+[action_policy.model_action]
+codec          = "eef_delta"
+layout         = ["delta_x", "delta_y", "delta_z", "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5", "gripper"]
+representation = "delta"
+frame          = "tool0"
+
+[action_policy.model_action.gripper]
+index     = 9
+semantics = "close_fraction"
+
+[action_policy.wire_action]
+codec            = "eef_absolute"
+layout           = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]
+representation   = "absolute"
+frame            = "tool0"
+quaternion_order = "xyzw"
+
+[action_policy.wire_action.gripper]
+index     = 7
+semantics = "close_fraction"
+
+[action_policy.conditioning]
+state_rows   = 0
+history_rows = 0
+source       = "none"
+timing       = "pose rows t0..t32 produce 32 frame-wise SE(3) deltas; gripper targets are action rows t1..t32"
+
+[action_policy.observation]
+layout_id           = "primary_top_aux_bottom_pair"
+view_shape_hw       = [360, 640]
+canvas_shape_hw     = [540, 640]
+view_roles          = ["primary", "aux_left", "aux_right"]
+missing_view_policy = "error"
+viewpoint            = "concat_view"
+description          = "The wrist view fills the top row; the left and right over-shoulder views share the bottom row."
+
+[action_policy.transform]
+resolution                     = "480"
+max_action_dim                 = 64
+action_channel_masking         = true
+append_viewpoint_info          = true
+append_duration_fps_timestamps = true
+append_resolution_info         = true
+append_idle_frames             = false
+format_prompt_as_json          = true
+
+[action_policy.normalization]
+kind = "none"
+
+[[action_policy.datasets]]
+name                    = "robolabsim_ur5_eef"
+root                    = "${oc.env:UR5_SINGLE_EEF_ROOT}"
+condition_source        = "none"
+action_features         = ["action.tool0_pose", "action"]
+state_features          = []
+camera_features         = { primary = "observation.images.wrist_cam", aux_left = "observation.images.over_shoulder_left_camera", aux_right = "observation.images.over_shoulder_right_camera" }
+action_layout           = ["delta_x", "delta_y", "delta_z", "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5", "gripper"]
+gripper_semantics       = "close_fraction"
+source_frame            = "tool0"
+source_quaternion_order = "wxyz"
+source_gripper_index    = 6
+source_target_offset    = 1
+description             = "RoboLabSim post-step tool0 poses are expressed in env-local/base coordinates as xyz+wxyz; action[t+1,6] is the close_fraction target paired with pose[t] to pose[t+1]."
+view_description        = "The top row is the wrist camera. The bottom row contains the left and right over-shoulder views of the single-arm UR5 workspace."

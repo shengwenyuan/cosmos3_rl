@@ -8,7 +8,7 @@ to LeRobot under `/mlp_vepfs/.../lerobot` (the single arm lands in the ``left`` 
 
 Usage (1 node, 8 GPU)::
 
-    UR5_SINGLE_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/RoboMIND1-ur5 \\
+    UR5_SINGLE_ROOT=/mlp_vepfs/share/swy/cosmos3-framework/lerobot/robomind1-ur5-joint \\
     BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir> WAN_VAE_PATH=<Wan2.2_VAE.pth> \\
     torchrun --nproc_per_node=8 -m cosmos_framework.scripts.train \\
         --sft-toml examples/toml/sft_config/action_policy_robomind_ur5_single_repro.toml

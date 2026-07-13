@@ -18,7 +18,7 @@ from cosmos_framework.data.generator.augmentors.duration_fps_text_timestamps imp
 from cosmos_framework.data.generator.augmentors.resolution_text_info import ResolutionTextInfo
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_prompt_json_formatter_builds_requested_structure() -> None:
     formatter = ActionPromptJsonFormatter()
     video = torch.zeros(3, 12, 480, 640)  # [C,T,H,W]
@@ -64,7 +64,7 @@ def test_action_prompt_json_formatter_builds_requested_structure() -> None:
     assert "additional_view_description" not in result
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_video_padding_round_trips_to_unpadded_region() -> None:
     video = torch.arange(3 * 2 * 4 * 5, dtype=torch.float32).reshape(3, 2, 4, 5)  # [C,T,H,W]
     data_dict = {"video": video}
@@ -82,7 +82,7 @@ def test_video_padding_round_trips_to_unpadded_region() -> None:
     torch.testing.assert_close(round_tripped, video)
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_prompt_json_formatter_drops_empty_fields() -> None:
     formatter = ActionPromptJsonFormatter()
     video = torch.zeros(3, 12, 480, 640)  # [C,T,H,W]
@@ -108,7 +108,7 @@ def test_action_prompt_json_formatter_drops_empty_fields() -> None:
     ]
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_prompt_json_formatter_drops_empty_viewpoint() -> None:
     formatter = ActionPromptJsonFormatter()
     video = torch.zeros(3, 12, 480, 640)  # [C,T,H,W]
@@ -128,7 +128,7 @@ def test_action_prompt_json_formatter_drops_empty_viewpoint() -> None:
     assert "cinematography" not in result["ai_caption"]
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_transform_pipeline_json_prompt_toggle() -> None:
     pipeline = ActionTransformPipeline(
         tokenizer_config=None,
@@ -153,7 +153,7 @@ def test_action_transform_pipeline_json_prompt_toggle() -> None:
     prompt = result["ai_caption"]
     assert isinstance(prompt, dict)
     assert list(prompt.keys()) == ["cinematography", "actions", "duration", "fps", "resolution", "aspect_ratio"]
-    assert list(prompt["actions"][0].keys()) == ["time", "description", "idle_frame"]
+    assert list(prompt["actions"][0].keys()) == ["time", "description"]
     assert prompt["cinematography"] == {
         "framing": "This video is captured from a third-person perspective looking towards the agent from the front."
     }
@@ -161,7 +161,6 @@ def test_action_transform_pipeline_json_prompt_toggle() -> None:
         {
             "time": "0:00-0:02",
             "description": "Open the drawer.",
-            "idle_frame": "3 out of 16.",
         }
     ]
     assert prompt["duration"] == "2s"
@@ -171,7 +170,7 @@ def test_action_transform_pipeline_json_prompt_toggle() -> None:
     assert result["action"].shape == (16, 4)
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_transform_pipeline_keeps_ai_caption_string_path() -> None:
     pipeline = ActionTransformPipeline(
         tokenizer_config=None,
@@ -204,7 +203,7 @@ def test_action_transform_pipeline_keeps_ai_caption_string_path() -> None:
     assert result["action"].shape == (16, 4)
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_transform_pipeline_keeps_idle_frames_for_forward_dynamics() -> None:
     pipeline = ActionTransformPipeline(
         tokenizer_config=None,
@@ -231,7 +230,7 @@ def test_action_transform_pipeline_keeps_idle_frames_for_forward_dynamics() -> N
     assert result["action"].shape == (16, 4)
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_transform_pipeline_skips_idle_frames_for_inverse_dynamics_string_path() -> None:
     pipeline = ActionTransformPipeline(
         tokenizer_config=None,
@@ -258,7 +257,28 @@ def test_action_transform_pipeline_skips_idle_frames_for_inverse_dynamics_string
     assert result["action"].shape == (16, 4)
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
+def test_action_prompt_json_formatter_honors_all_metadata_switches() -> None:
+    formatter = ActionPromptJsonFormatter(
+        append_viewpoint_info=False,
+        append_duration_fps_timestamps=False,
+        append_resolution_info=False,
+        append_idle_frames=False,
+    )
+    result = formatter(
+        {
+            "ai_caption": "Close the gripper",
+            "mode": "policy",
+            "idle_frames": torch.tensor(9),
+            "additional_view_description": "Must not appear.",
+        }
+    )
+
+    assert result["ai_caption"] == {"actions": [{"description": "Close the gripper."}]}
+    assert "additional_view_description" not in result
+
+
+@pytest.mark.level(0)
 def test_action_transform_pipeline_skips_idle_frames_for_inverse_dynamics_json_prompt() -> None:
     pipeline = ActionTransformPipeline(
         tokenizer_config=None,
@@ -291,7 +311,7 @@ def test_action_transform_pipeline_skips_idle_frames_for_inverse_dynamics_json_p
     assert result["action"].shape == (16, 4)
 
 
-@pytest.mark.L0
+@pytest.mark.level(0)
 def test_action_prompt_json_formatter_matches_video_json_common_metadata() -> None:
     formatter = ActionPromptJsonFormatter()
     video = torch.zeros(3, 23, 192, 320)  # [C,T,H,W]

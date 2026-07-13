@@ -1,0 +1,118 @@
+# Source-neutral UR5 single-arm joint-position overfit proof on RoboLabSim.
+
+[job]
+task       = "vfm"
+experiment = "action_policy_ur5_single_joint_nano"
+project    = "cosmos3_action"
+group      = "action_sft"
+name       = "robolabsim_ur5_joint_overfit"
+wandb_mode = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr           = 5.0e-5
+weight_decay = 0.0
+
+[scheduler]
+cycle_lengths = [600]
+f_start       = [0.0]
+f_max         = [0.4]
+f_min         = [0.0]
+warm_up_steps = [20]
+
+[trainer]
+max_iter     = 600
+logging_iter = 10
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 0.5
+force_finite = true
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 150
+
+[dataloader_train]
+max_samples_per_batch = 4
+
+# Artifact contract: training validates this section and writes the resolved
+# canonical action_policy.yaml at the run root. Serving discovers that
+# sidecar directly; no dataset-class reflection or robot-specific defaults.
+[action_policy]
+schema_version = 1
+profile_id      = "robolabsim_ur5_joint_15hz_c32"
+robot           = "ur5"
+domain_name     = "ur5-single-joint"
+policy_fps      = 15
+chunk_size      = 32
+
+[action_policy.model_action]
+codec          = "joint_position"
+layout         = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3", "gripper"]
+representation = "absolute"
+
+[action_policy.model_action.gripper]
+index     = 6
+semantics = "close_fraction"
+
+[action_policy.wire_action]
+codec          = "joint_position"
+layout         = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3", "gripper"]
+representation = "absolute"
+
+[action_policy.wire_action.gripper]
+index     = 6
+semantics = "close_fraction"
+
+[action_policy.conditioning]
+state_rows   = 1
+history_rows = 1
+source       = "current_state"
+timing       = "row 0 is the current joint/gripper state; rows 1..32 are future absolute targets"
+
+[action_policy.observation]
+layout_id           = "primary_top_aux_bottom_pair"
+view_shape_hw       = [360, 640]
+canvas_shape_hw     = [540, 640]
+view_roles          = ["primary", "aux_left", "aux_right"]
+missing_view_policy = "black"
+viewpoint            = "concat_view"
+description          = "One primary view fills the top row; two ordered auxiliary slots share the bottom row."
+
+[action_policy.transform]
+resolution                     = "480"
+max_action_dim                 = 64
+action_channel_masking         = true
+append_viewpoint_info          = true
+append_duration_fps_timestamps = true
+append_resolution_info         = true
+append_idle_frames             = false
+format_prompt_as_json          = true
+
+[action_policy.normalization]
+kind = "none"
+
+[[action_policy.datasets]]
+name               = "robolabsim_ur5_joint"
+root               = "${oc.env:UR5_SINGLE_ROOT}"
+condition_source   = "action_t0"
+action_features    = ["action"]
+state_features     = []
+camera_features    = { primary = "observation.images.wrist_cam", aux_left = "observation.images.over_shoulder_left_camera", aux_right = "observation.images.over_shoulder_right_camera" }
+action_layout      = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3", "gripper_close"]
+gripper_semantics  = "close_fraction"
+description        = "RoboLabSim UR5 single-arm absolute joint targets; action[t0] is the explicit current-state conditioning row."
+view_description   = "The top row is the wrist camera. The bottom row contains the left and right over-shoulder views of the single-arm UR5 workspace."

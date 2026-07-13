@@ -47,5 +47,74 @@ logging_iter = 50
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter = 500
 
+[action_policy]
+schema_version = 1
+profile_id      = "berkeley_ur5_eef_5hz_c32"
+robot           = "ur5"
+domain_name     = "berkeley-ur5-eef"
+policy_fps      = 5
+chunk_size      = 32
+
+[action_policy.model_action]
+codec          = "eef_delta"
+layout         = ["delta_x", "delta_y", "delta_z", "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5", "gripper"]
+representation = "delta"
+frame          = "berkeley_tcp"
+
+[action_policy.model_action.gripper]
+index     = 9
+semantics = "close_fraction"
+
+[action_policy.wire_action]
+codec            = "eef_absolute"
+layout           = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]
+representation   = "absolute"
+frame            = "berkeley_tcp"
+quaternion_order = "xyzw"
+
+[action_policy.wire_action.gripper]
+index     = 7
+semantics = "close_fraction"
+
+[action_policy.conditioning]
+state_rows   = 0
+history_rows = 0
+source       = "none"
+timing       = "32 frame-wise SE(3) deltas map observation t0..t31 to t1..t32; no action state row is prepended"
+
+[action_policy.observation]
+layout_id           = "primary_top_aux_bottom_pair_right_missing"
+view_shape_hw       = [360, 640]
+canvas_shape_hw     = [540, 640]
+view_roles          = ["primary", "aux_left", "aux_right"]
+missing_view_policy = "black"
+viewpoint            = "concat_view"
+description          = "One primary view fills the top row; two ordered auxiliary slots share the bottom row."
+
+[action_policy.transform]
+resolution                     = "480"
+max_action_dim                 = 64
+action_channel_masking         = true
+append_viewpoint_info          = true
+append_duration_fps_timestamps = true
+append_resolution_info         = true
+append_idle_frames             = false
+format_prompt_as_json          = false
+
+[action_policy.normalization]
+kind = "none"
+
+[[action_policy.datasets]]
+name               = "berkeley_autolab_ur5"
+root               = "${oc.env:BERKELEY_UR5_ROOT}"
+condition_source   = "none"
+action_features    = ["observation.state", "action"]
+state_features     = []
+camera_features    = { primary = "observation.images.hand_image", aux_left = "observation.images.image" }
+action_layout      = ["delta_x", "delta_y", "delta_z", "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5", "gripper"]
+gripper_semantics  = "close_fraction"
+description        = "Berkeley AUTOLab UR5: SE(3) targets are derived from absolute observation.state poses; action[6] supplies the close_fraction gripper command."
+view_description   = "The top row is the wrist camera. The bottom-left row is the external Berkeley UR5 camera; the bottom-right row is a zero-padded missing view."
+
 # The experiment uses lr=1e-4 and 2x action-head multipliers for the full-batch shape.
 # Scale lr down for smaller effective batch, and stop early if held-out task/success proxy degrades.
