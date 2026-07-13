@@ -67,6 +67,16 @@ python -m cosmos_framework.scripts.action_policy_server_robolab \
   --port 8000
 ```
 
+The published DROID alias uses its bundled versioned compatibility manifest.
+For every custom checkpoint, training writes `<run>/action_policy.yaml`; point
+`--checkpoint-path` at the artifact and either let the server discover that
+run sidecar or pass it explicitly with `--policy-config`. Action dimensions,
+layout, observation contract, timing, and gripper direction are not runtime
+CLI switches. A single-source policy such as DROID is selected automatically;
+for a future multi-source artifact, start the server with the exact manifest
+entry `--dataset-source <datasets.name>` so its training view prompt and camera
+presence mask are advertised to the client.
+
 ## Simulation Client
 
 Clone [`RoboLab`](https://github.com/NVlabs/RoboLab):

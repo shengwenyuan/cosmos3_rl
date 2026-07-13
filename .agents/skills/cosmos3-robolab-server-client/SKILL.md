@@ -55,6 +55,7 @@ LD_LIBRARY_PATH=/usr/local/cuda/compat/lib \
 python -u -m cosmos_framework.scripts.action_policy_server_robolab \
   --checkpoint-path /mlp_vepfs/share/swy/cosmos3-framework/checkpoints/Cosmos3-Nano-Policy-DROID-dcp/model \
   --config-file /mlp_vepfs/share/swy/cosmos3-framework/checkpoints/Cosmos3-Nano-Policy-DROID-dcp/model/config.json \
+  --policy-config cosmos_framework/scripts/action_policy_manifests/droid_release.yaml \
   --allow-dcp-checkpoint \
   --host 0.0.0.0 \
   --port 8000 \
@@ -71,37 +72,42 @@ curl http://<server-ip>:8000/healthz
 Use the server IP that is reachable from the RoboLab client, not `127.0.0.1`.
 
 
-### Decoupled Robot/Action Server
+### Manifest-driven Robot/Action Server
 
-For new RoboLab robot backends and non-DROID action layouts, prefer the decoupled entry point:
+There is one universal entry point. Every non-published artifact must carry an
+`action_policy.yaml` at its run root/export directory, or pass the training TOML via
+`--policy-config`. Robot/action/observation/gripper semantics come only from
+that validated manifest:
 
 ```bash
 LD_LIBRARY_PATH=/usr/local/cuda/compat/lib \
-python -u -m cosmos_framework.scripts.action_policy_server_robolab_div \
+python -u -m cosmos_framework.scripts.action_policy_server_robolab \
   --checkpoint-path <checkpoint>/model \
   --config-file <checkpoint-or-run>/config.yaml \
+  --policy-config <run>/action_policy.yaml \
   --allow-dcp-checkpoint \
   --host 0.0.0.0 \
   --port 8000 \
-  --domain-name <domain-name> \
-  --action-space <joint_pos|eef_pose> \
-  --action-dim <raw-model-action-dim> \
-  --conditioning-fps <fps> \
-  --action-chunk-size <horizon> \
-  --resolution 480 \
   --output-dir /mlp_vepfs/share/swy/cosmos3-framework/outputs/action_server_robolab_<run-id> \
   --seed <seed>
 ```
 
-Use `--action-space joint_pos` for direct joint-position policy output. The joint width is controlled by `--joint-dof` plus `--gripper-dim`; `--action-dim` must match that sum when provided. Use `--action-space eef_pose` for a single-arm EEF policy whose model output is 10D `[pos_delta(3), rot6d_delta(6), gripper(1)]` and whose server response is converted to the client 8D absolute EEF contract `[position(3), quat_xyzw(4), gripper(1)]`. The current EEF execution path is single-arm only; dual-arm widths are reserved but not implemented.
+Do not add action-space, dimension, state/history, FPS, resolution, view text,
+or gripper-direction CLI overrides. The server rejects missing/invalid manifests
+instead of guessing from a dataset class. The published DROID alias has one
+bundled versioned compatibility manifest.
 
-For checkpoints trained without a prepended state/history action row, pass:
+If a manifest declares more than one `[[action_policy.datasets]]` source, the
+server operator must select one exact YAML entry with
+`--dataset-source <datasets.name>`. A single-source manifest auto-selects its
+only entry. This selector cannot override YAML content: it chooses the exact
+training view prompt and advertised real/black camera-slot mask, which the
+client checks against its explicit `--camera-preset` during the handshake.
 
-```bash
---no-use-state --history-length 0
-```
-
-Do not mix `--use-state` / nonzero `--history-length` with a checkpoint whose dataset produced only `chunk_length` action rows.
+Training owns the canonical sidecar at `<run>/action_policy.yaml`; checkpoint
+directories discover only their enclosing standard `checkpoints/` owner. To
+resume a checkpoint created before manifests existed, audit the current TOML,
+then set `ADOPT_LEGACY_ACTION_POLICY_MANIFEST=1` for the one migration launch.
 
 ## Client Runner Selection
 
@@ -110,9 +116,9 @@ Choose the client runner by robot backend before composing the command. Do not a
 | Robot/backend | Client runner | Notes |
 | --- | --- | --- |
 | DROID/default | `policies/cosmos3/run.py` | Uses DROID joint-position registrations and the base `Cosmos3Client`. |
-| UR5e | `policies/cosmos3/run_ur5.py` | Uses UR5e joint-position registrations and `Cosmos3UR5Client`. For `--server-action-format joint`, it maps returned joint actions to the 6D UR5 arm. For `--server-action-format eef_pose`, it sends `ee_pos`/`ee_quat` and converts server 8D absolute EEF pose chunks to 6D joint actions through the Pinocchio bridge. |
+| UR5e | `policies/cosmos3/run_ur5.py` | Uses UR5e joint-position registrations and `Cosmos3UR5Client`. The handshake selects joint or EEF decoding. EEF policies send `ee_pos`/`ee_quat` and convert absolute pose chunks to 6D joint actions through the Pinocchio bridge. |
 | ARX X5 | `policies/cosmos3/run_x5.py` | Uses X5 joint-position registrations and the base `Cosmos3Client` with X5 camera presets. |
-| Unknown/new robot | Inspect `policies/cosmos3/run_<robot>.py`, its registration import, camera presets, proprio observation keys, and action manager width before launching. Preserve the user-provided runner if they already supplied one. Match server `--action-space`, `--joint-dof`, `--gripper-dim`, and `--action-dim` to that runner. |
+| Unknown/new robot | Inspect `policies/cosmos3/run_<robot>.py`, its registration import, camera preset capability, proprio keys, and action manager width. The server handshake contract supplies dimensions/semantics; do not duplicate them in CLI flags. |
 
 For explicit task files, prefer full client-side task paths such as `robolab/tasks/atomic_pnp/banana_in_bowl_task.py` over a bare filename. This avoids ambiguity between `atomic_pnp`, `benchmark`, and other task roots and ensures registration happens before the policy client is constructed.
 
@@ -123,10 +129,9 @@ PAI/DSW server:
   `/mlp_vepfs/share/swy/cosmos3-framework/outputs/droid_full_bs32_002/cosmos3_action/action_sft/droid_full_bs32_002/checkpoints/iter_000002000/model`
 - Server config:
   `/mlp_vepfs/share/swy/cosmos3-framework/outputs/droid_full_bs32_002/cosmos3_action/action_sft/droid_full_bs32_002/config.yaml`
-- Server args that mattered:
-  `--domain-name droid_lerobot --action-space joint_pos --joint-dof 7
-  --gripper-dim 1 --action-dim 8 --conditioning-fps 15 --action-chunk-size 32
-  --resolution 480 --seed 0 --deterministic-seed`
+- Historical policy semantics were 8D joint+gripper, 15 Hz, chunk 32. They are
+  now captured by the artifact manifest; runtime args are only `--seed 0
+  --deterministic-seed` and transport/model-loading options.
 - Client command shape:
   `policies/cosmos3/run.py --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py
   --num-envs 1 --num-runs 1 --video-mode all --headless`
@@ -174,7 +179,6 @@ TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
   --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py \
   --remote-host <server-ip> \
   --remote-port 8000 \
-  --server-action-format eef_pose \
   --camera-preset berkeley_eef \
   --num-envs 1 \
   --num-runs 1 \
@@ -184,6 +188,11 @@ TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
 ```
 
 The `berkeley_eef` camera preset is intended to send the Berkeley-style external + wrist + zero/missing-view canvas to the policy server. It is valid for exercising the server-client action chain, but verify wrist-camera registration and gripper execution separately before using success rate as a policy-quality metric.
+
+For a RoboMIND-single joint checkpoint, use the same UR5 runner with
+`--camera-preset robomind_single`. That preset maps `head_camera` to the
+manifest's `overhead` role and synthesizes the two declared missing auxiliary
+views as black frames.
 
 Use `--video-mode all` when video capture is desired; this writes mp4 files under `/root/code/RoboLab/output/<run>/...`. Use `--video-mode none` only when the user explicitly requests no videos. Add `--livestream 2` only when the user explicitly requests livestreaming; omit it for ordinary headless recording runs.
 
@@ -210,13 +219,9 @@ The helper should generate 3 conditions per task: `baseline`, `pose_xy40_yawpi2`
 | `--output-folder-name` | Output folder relative to RoboLab output root. | Keep the same run root when resuming. Do not switch roots unless requested. |
 | `--randomize-contact-pose` and offsets | Trial perturbation flags. | Preserve exact values from manifest/history using structured parsing such as `shlex.split`. |
 | `--seed` | Reproducibility seed when supported by the invoked script. | Preserve historical/user seed; ask if absent and reproducibility matters. |
-| server `--action-space` | Server-side raw action representation. | Use `joint_pos` for joint-position policy output and `eef_pose` for EEF-pose policy output. Preserve the checkpoint's training representation. |
-| server `--action-dim` | Raw model action width before server/client postprocessing. | Must match the checkpoint target width. Berkeley UR5 EEF uses 10D model output; single-arm EEF client contract after server conversion is 8D. |
-| server `--joint-dof`, `--gripper-dim` | Joint-space width components for decoupled robot backends. | For `joint_pos`, `action_dim == joint_dof + gripper_dim` when `--action-dim` is provided. Current gripper execution commonly supports one gripper scalar or diagnostics-only, depending on robot. |
-| server `--use-state` / `--no-use-state` | Whether the first action row is current state conditioning. | Must match training. Berkeley UR5 EEF full-run checkpoints used no state row in deployment tests, so launch with `--no-use-state --history-length 0`. |
-| server `--history-length` | Number of state/history rows trimmed from generated actions. | Use `0` unless the training dataset and server request both intentionally include history action rows. |
-| client `--server-action-format` | UR5 client interpretation of server response. | Use `eef_pose` when server returns `[position, quat_xyzw, gripper]`; use `joint` for joint action responses; `auto` is shape-based and should only be used when both sides are known. |
-| client `--camera-preset` | UR5 camera bundle used by the runner registration. | Use `berkeley_eef` for Berkeley UR5 EEF tests; verify the physical/sim camera registration if task success is being judged. |
+| server `--policy-config` | Explicit manifest/TOML for an older checkpoint without its sidecar. | New runs auto-discover `action_policy.yaml`; use the exact training TOML only for legacy artifacts. |
+| action semantics | Model/wire codec, dimensions, state/history, FPS/chunk, normalization and gripper direction. | Read from the run manifest and handshake only; there are no semantic CLI overrides. Wire gripper is always `close_fraction` (`0=open`, `1=closed`). |
+| client `--camera-preset` | UR5 camera bundle used by the runner registration. | Use `berkeley_eef` for Berkeley UR5 EEF, `robomind_single` for overhead + two black views, and `wrist_left_right` for the standard three-view contract. |
 
 RoboLab code references verified on the client: `robolab/eval/runner.py:136` defines `--video-mode`; `robolab/eval/runner.py:273` sets `save_videos = args.video_mode != "none"`; `robolab/eval/runner.py:337` passes `save_videos`; `robolab/eval/runner.py:338` passes `video_mode`.
 
@@ -229,20 +234,13 @@ Server:
 
 ```bash
 LD_LIBRARY_PATH=/usr/local/cuda/compat/lib \
-python -u -m cosmos_framework.scripts.action_policy_server_robolab_div \
+python -u -m cosmos_framework.scripts.action_policy_server_robolab \
   --checkpoint-path /mlp_vepfs/share/swy/cosmos3-framework/outputs/berkeley_ur5_eef_h20/cosmos3_action/action_sft/berkeley_ur5_eef_full3000_bs8_001/checkpoints/iter_000003000/model \
   --config-file /mlp_vepfs/share/swy/cosmos3-framework/outputs/berkeley_ur5_eef_h20/cosmos3_action/action_sft/berkeley_ur5_eef_full3000_bs8_001/config.yaml \
+  --policy-config examples/toml/sft_config/action_policy_berkeley_ur5_eef_repro.toml \
   --allow-dcp-checkpoint \
   --host 0.0.0.0 \
   --port 8000 \
-  --domain-name berkeley-ur5-eef \
-  --action-space eef_pose \
-  --action-dim 10 \
-  --conditioning-fps 5 \
-  --action-chunk-size 32 \
-  --resolution 480 \
-  --no-use-state \
-  --history-length 0 \
   --seed 0 \
   --deterministic-seed \
   --output-dir /mlp_vepfs/share/swy/cosmos3-framework/outputs/action_server_robolab_berkeley_ur5_eef_<run-id>
@@ -251,12 +249,11 @@ python -u -m cosmos_framework.scripts.action_policy_server_robolab_div \
 Client:
 
 ```bash
-ssh -i ~/.ssh/cosmos3_robolab_20260627 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p 2222 root@10.174.136.228 \
+ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -p 2222 root@10.174.136.228 \
   'cd /root/code/RoboLab && TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
     --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py \
     --remote-host <server-ip> \
     --remote-port 8000 \
-    --server-action-format eef_pose \
     --camera-preset berkeley_eef \
     --num-envs 1 \
     --num-runs 1 \

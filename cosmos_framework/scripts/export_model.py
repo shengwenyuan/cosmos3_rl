@@ -26,6 +26,12 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_
 from cosmos_framework.checkpoint.dcp import CustomLoadPlanner
 from cosmos_framework.checkpoint.s3_filesystem import S3StorageReader
 from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
+from cosmos_framework.data.generator.action.policy_schema import (
+    ActionPolicyManifest,
+    find_action_policy_manifest,
+    load_action_policy_manifest,
+    save_action_policy_manifest,
+)
 from cosmos_framework.inference.common.args import (
     CheckpointOverrides,
     ParallelismOverrides,
@@ -75,6 +81,8 @@ class Args(ParallelismOverrides):
     """If True, only export config."""
     vit: bool = True
     """If True, export ViT weights."""
+    policy_config: Path | None = None
+    """Explicit action_policy YAML/TOML for a detached or legacy checkpoint without a sidecar."""
 
 
 def _load_safetensor_weights(model_dir: Path, predicate: Callable[[str], bool]) -> dict:
@@ -104,9 +112,36 @@ def _rewrite_visual_fqns_for_vfm(state_dict: dict[str, Any]) -> dict[str, Any]:
     return remapped_state_dict
 
 
+def _resolve_action_policy_manifest(checkpoint_path: str, explicit: Path | None) -> ActionPolicyManifest | None:
+    discovered_path = find_action_policy_manifest(checkpoint_path)
+    discovered = load_action_policy_manifest(discovered_path) if discovered_path is not None else None
+    requested = load_action_policy_manifest(explicit) if explicit is not None else None
+    if discovered is not None and requested is not None and discovered != requested:
+        raise ValueError(
+            f"Explicit policy config {explicit} conflicts with the checkpoint owner's canonical {discovered_path}"
+        )
+    return discovered or requested
+
+
+def _validate_action_policy_destination(manifest: ActionPolicyManifest | None, output_dir: Path) -> None:
+    """Reject stale export semantics before any model files are written."""
+    destination = output_dir / "action_policy.yaml"
+    if manifest is None:
+        if destination.exists():
+            raise ValueError(
+                f"Export source has no action-policy manifest, but destination already contains {destination}. "
+                "Use a clean output directory."
+            )
+        return
+    if destination.exists() and load_action_policy_manifest(destination) != manifest:
+        raise ValueError(f"Refusing to replace a different exported action-policy manifest: {destination}")
+
+
 def export_model(args: Args):
     register_checkpoints()
     checkpoint_args = args.checkpoint.build_checkpoint(checkpoints={})
+    manifest = _resolve_action_policy_manifest(checkpoint_args.checkpoint_path, args.policy_config)
+    _validate_action_policy_destination(manifest, args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load config
@@ -183,6 +218,9 @@ def export_model(args: Args):
     hf_config_json = json.loads(hf_config_file.read_text())
     hf_config_json["model_type"] = "cosmos3_omni"
     serialize_config_dict(hf_config_json, hf_config_file)
+
+    if manifest is not None:
+        save_action_policy_manifest(manifest, args.output_dir / "action_policy.yaml")
 
     # Write 'checkpoint.json' last to indicate that the model is complete.
     serialize_config_dict(checkpoint_args.model_dump(mode="json"), args.output_dir / "checkpoint.json")
