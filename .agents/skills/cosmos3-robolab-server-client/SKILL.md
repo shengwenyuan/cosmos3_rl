@@ -38,13 +38,13 @@ Do not silently change these fields:
    under `$COSMOS3_FRAMEWORK_HOME/venvs/` and validate the selected interpreter
    with `import torch`, `torch.cuda.is_available()`, and the policy-server
    imports.
-6. Do not hard-code an old server address. Detect the IP reachable from the
-   RoboLab client on every run. Good checks are `hostname -I`, `ip route get
-   <client-ip>` on the server, the policy-server "Server accessible at" log
-   line, and a client-side `curl http://<server-ip>:8000/healthz` before
-   launching Isaac Sim. The current thread verified a new PAI/DSW server via
-   source IP `10.169.233.61` to client `10.174.136.228`; do not reuse older
-   addresses such as `10.174.241.114` unless routing confirms them.
+6. Do not assume a historical server address is still reachable. Detect the IP
+   reachable from the RoboLab client on every run. Check `hostname -I` and
+   `ip route get <client-ip>` on the server, the policy-server "Server accessible
+   at" log line, and `curl http://<server-ip>:8000/healthz` on the client before
+   launching Isaac Sim. The latest verified UR5 run on 2026-07-14 used server
+   `10.174.241.114` and client `10.174.136.228`; treat that as a known-good
+   record, not a permanent default.
 
 ## Server Start
 
@@ -83,14 +83,18 @@ that validated manifest:
 LD_LIBRARY_PATH=/usr/local/cuda/compat/lib \
 python -u -m cosmos_framework.scripts.action_policy_server_robolab \
   --checkpoint-path <checkpoint>/model \
-  --config-file <checkpoint-or-run>/config.yaml \
-  --policy-config <run>/action_policy.yaml \
+  --config-file <run>/config.yaml \
   --allow-dcp-checkpoint \
   --host 0.0.0.0 \
   --port 8000 \
   --output-dir /mlp_vepfs/share/swy/cosmos3-framework/outputs/action_server_robolab_<run-id> \
   --seed <seed>
 ```
+
+This preferred form assumes `<checkpoint>/model` is under the standard
+`<run>/checkpoints/iter_*/` tree and therefore auto-discovers
+`<run>/action_policy.yaml`. Add `--policy-config <path>` only for a legacy or
+relocated checkpoint that cannot discover its owning run.
 
 Do not add action-space, dimension, state/history, FPS, resolution, view text,
 or gripper-direction CLI overrides. The server rejects missing/invalid manifests
@@ -108,6 +112,59 @@ Training owns the canonical sidecar at `<run>/action_policy.yaml`; checkpoint
 directories discover only their enclosing standard `checkpoints/` owner. To
 resume a checkpoint created before manifests existed, audit the current TOML,
 then set `ADOPT_LEGACY_ACTION_POLICY_MANIFEST=1` for the one migration launch.
+
+### Latest Verified UR5 Fast Path (2026-07-14)
+
+Joint and EEF policies now use the same universal server and the same UR5
+client runner. The handshake selects joint-position versus EEF decoding; do not
+add an action-space flag on either side. The camera preset is selected from the
+artifact's observation/source contract and is independent of the action codec.
+
+This exact RoboMIND1 single-camera joint checkpoint pair completed the current
+server-client chain:
+
+Server, from `/root/code/cosmos-framework`:
+
+```bash
+source /root/.bashrc && cosmos3-activate && \
+RUN=/mlp_vepfs/share/swy/cosmos3-framework/outputs/robomind1_ur5_joint_full_gbs256_001/cosmos3_action/action_sft/robomind1_ur5_joint_full_gbs256_001 && \
+LD_LIBRARY_PATH=/usr/local/cuda/compat/lib \
+python -u -m cosmos_framework.scripts.action_policy_server_robolab \
+  --checkpoint-path "$RUN/checkpoints/iter_000002000/model" \
+  --config-file "$RUN/config.yaml" \
+  --allow-dcp-checkpoint \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --seed 0 \
+  --deterministic-seed \
+  --output-dir "/mlp_vepfs/share/swy/cosmos3-framework/outputs/action_server_robolab_robomind1_ur5_iter2000_$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
+```
+
+Client, from `/root/code/RoboLab` on `10.174.136.228`:
+
+```bash
+TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
+  --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py \
+  --remote-host 10.174.241.114 \
+  --remote-port 8000 \
+  --camera-preset robomind_single \
+  --num-envs 1 \
+  --num-runs 1 \
+  --video-mode all \
+  --headless \
+  --output-folder-name robomind1_ur5_iter2000_banana_20260714_1440
+```
+
+For a new joint or EEF artifact, replace only `RUN`, checkpoint iteration,
+reachable server IP, camera preset, and output name unless the user changes the
+experiment. Keep `--config-file` at the run root and the DCP
+`--checkpoint-path` ending in `/model`. In this standard
+`<run>/checkpoints/iter_*/model` layout the server discovers
+`<run>/action_policy.yaml`, so omit `--policy-config`. Pass it explicitly only
+for a legacy artifact or a checkpoint copied outside its owning run tree. For
+RoboMIND one-overhead-camera artifacts use `robomind_single`; use
+`berkeley_eef` or `wrist_left_right` only when the manifest's camera contract
+matches those presets.
 
 ## Client Runner Selection
 
@@ -158,20 +215,6 @@ Run each RoboLab task from `/root/code/RoboLab` on the client:
 
 For atomic pick tasks, use `robolab/tasks/atomic_pick/<task>.py`; for pick-and-place tasks, use `robolab/tasks/atomic_pnp/<task>.py`.
 
-UR5e single-task smoke command verified on 2026-07-04:
-
-```bash
-TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
-  --task robolab/tasks/atomic_pnp/banana_in_bowl_task.py \
-  --num-envs 1 \
-  --num-runs 1 \
-  --video-mode all \
-  --headless \
-  --remote-host <server-ip> \
-  --remote-port 8000
-```
-
-
 UR5e Berkeley EEF single-task smoke template:
 
 ```bash
@@ -189,10 +232,10 @@ TERM=xterm /workspace/isaaclab/isaaclab.sh -p policies/cosmos3/run_ur5.py \
 
 The `berkeley_eef` camera preset is intended to send the Berkeley-style external + wrist + zero/missing-view canvas to the policy server. It is valid for exercising the server-client action chain, but verify wrist-camera registration and gripper execution separately before using success rate as a policy-quality metric.
 
-For a RoboMIND-single joint checkpoint, use the same UR5 runner with
-`--camera-preset robomind_single`. That preset maps `head_camera` to the
-manifest's `overhead` role and synthesizes the two declared missing auxiliary
-views as black frames.
+For the current RoboMIND-single joint/EEF pattern, start from the latest
+verified paired commands above. Its `robomind_single` preset maps `head_camera`
+to the manifest's overhead role and synthesizes the two declared missing
+auxiliary views as black frames.
 
 Use `--video-mode all` when video capture is desired; this writes mp4 files under `/root/code/RoboLab/output/<run>/...`. Use `--video-mode none` only when the user explicitly requests no videos. Add `--livestream 2` only when the user explicitly requests livestreaming; omit it for ordinary headless recording runs.
 
