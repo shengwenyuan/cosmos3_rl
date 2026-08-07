@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cosmos3 Paper Reference"
+  short_description: "Use local Cosmos3 and RoboMIND papers"
+  default_prompt: "Use $cosmos3-paper-reference to verify Cosmos3 or RoboMIND claims against the local papers."
