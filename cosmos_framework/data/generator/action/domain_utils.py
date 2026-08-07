@@ -25,6 +25,12 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
     "abc_yam": 16,  # ABC uses the same YAM 20D FK action contract
     "fractal": 20,
     "drawanything": 21,
+    # cosmos3_rl UR5 extensions. Reserve the high end of the current 32-slot table.
+    "berkeley-ur5-eef": 29,
+    "ur5-single-eef": 29,
+    "ur5-single-joint": 30,
+    "robomind-ur5-single": 30,
+    "robomind-ur5-dual": 31,
 }
 
 
@@ -80,4 +86,4 @@ def get_action_dim(embodiment_type: str) -> int:
 def is_valid_domain_name(embodiment_type: str) -> bool:
     """Check if the given embodiment type is recognized."""
     key = embodiment_type.lower().strip()
-    return key in EMBODIMENT_TO_RAW_ACTION_DIM
+    return key in EMBODIMENT_TO_DOMAIN_ID

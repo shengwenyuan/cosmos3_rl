@@ -19,8 +19,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import get_process_group_ranks
 
-from cosmos_framework.utils.flags import INTERNAL
 from cosmos_framework.utils.device import Device
+from cosmos_framework.utils.flags import INTERNAL
 
 if dist.is_available():
     from torch.distributed.distributed_c10d import _get_default_group
@@ -43,7 +43,7 @@ def init() -> int | None:
     try:
         device = Device(local_rank)
         os.sched_setaffinity(0, device.get_cpu_affinity())
-    except pynvml.NVMLError as e:
+    except (OSError, pynvml.NVMLError) as e:
         log.warning(f"Failed to set device affinity: {e}")
     # Set up distributed communication. CPU checkpoint conversion needs Gloo
     # because NCCL cannot synchronize CPU-resident tokenizer or model tensors.

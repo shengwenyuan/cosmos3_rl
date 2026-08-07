@@ -86,6 +86,18 @@ class ActionBaseDataset(ABC, Dataset):
     def fps(self) -> float:
         return self._fps
 
+    @staticmethod
+    def _task_text_from_row(row: dict[str, Any]) -> str:
+        """Read task text from common LeRobot task-table variants."""
+        for key in ("task", "language_instruction", "__index_level_0__", "instruction", "text"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        for key, val in row.items():
+            if key != "task_index" and isinstance(val, str) and val.strip():
+                return val
+        return str(row.get("task_index", ""))
+
     @property
     def chunk_length(self) -> int:
         return self._chunk_length

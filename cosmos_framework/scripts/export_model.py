@@ -33,6 +33,12 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_
 from cosmos_framework.checkpoint.dcp import CustomLoadPlanner
 from cosmos_framework.checkpoint.s3_filesystem import S3StorageReader
 from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
+from cosmos_framework.data.generator.action.policy_schema import (
+    ActionPolicyManifest,
+    find_action_policy_manifest,
+    load_action_policy_manifest,
+    save_action_policy_manifest,
+)
 from cosmos_framework.inference.common.args import (
     CheckpointOverrides,
     ParallelismOverrides,
@@ -191,6 +197,8 @@ class Args(ParallelismOverrides):
     """If True, export ViT weights."""
     vit_checkpoint_path: ResolvedPath | None = None
     """Optional local Hugging Face checkpoint directory containing ViT weights."""
+    policy_config: Path | None = None
+    """Explicit action_policy YAML/TOML for a detached or legacy checkpoint without a sidecar."""
     verify: bool = False
     """If True, smoke-test the exported checkpoint with single-GPU inference (tiny reasoner + generation samples)."""
 
@@ -220,6 +228,55 @@ def _rewrite_visual_fqns_for_vfm(state_dict: dict[str, Any]) -> dict[str, Any]:
             key = _INTERNAL_VISUAL_PREFIX + key[len(_EXPORTED_VISUAL_PREFIX) :]
         remapped_state_dict[key] = value
     return remapped_state_dict
+
+
+def _resolve_action_policy_manifest(checkpoint_path: str, explicit: Path | None) -> ActionPolicyManifest | None:
+    discovered_path = find_action_policy_manifest(checkpoint_path)
+    discovered = load_action_policy_manifest(discovered_path) if discovered_path is not None else None
+    requested = load_action_policy_manifest(explicit) if explicit is not None else None
+    if discovered is not None and requested is not None and discovered != requested:
+        raise ValueError(
+            f"Explicit policy config {explicit} conflicts with the checkpoint owner's canonical {discovered_path}"
+        )
+    return discovered or requested
+
+
+def _validate_action_policy_destination(manifest: ActionPolicyManifest | None, output_dir: Path) -> None:
+    """Reject stale export semantics before any model files are written."""
+    destination = output_dir / "action_policy.yaml"
+    if manifest is None:
+        if destination.exists():
+            raise ValueError(
+                f"Export source has no action-policy manifest, but destination already contains {destination}. "
+                "Use a clean output directory."
+            )
+        return
+    if destination.exists() and load_action_policy_manifest(destination) != manifest:
+        raise ValueError(f"Refusing to replace a different exported action-policy manifest: {destination}")
+
+
+def _validate_edge_policy_metadata(
+    manifest: ActionPolicyManifest | None,
+    edge_policy_metadata: dict[str, Any] | None,
+) -> None:
+    """Keep the official Edge checkpoint policy block and the richer sidecar consistent."""
+    if manifest is None or edge_policy_metadata is None:
+        return
+    expected = {
+        "action_chunk_size": manifest.chunk_size,
+        "conditioning_fps": float(manifest.policy_fps),
+        "domain_name": manifest.domain_name,
+    }
+    mismatches = {
+        key: (edge_policy_metadata.get(key), value)
+        for key, value in expected.items()
+        if edge_policy_metadata.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(
+            "Action-policy manifest conflicts with official Edge checkpoint metadata "
+            f"(checkpoint, manifest): {mismatches}"
+        )
 
 
 # Env vars stripped from the --verify subprocess: init_script pinned
@@ -365,6 +422,8 @@ def _verify_exported_checkpoint(output_dir: Path, *, run_reasoner_check: bool) -
 def export_model(args: Args) -> None:
     register_checkpoints()
     checkpoint_args = args.checkpoint.build_checkpoint(checkpoints={})
+    action_policy_manifest = _resolve_action_policy_manifest(checkpoint_args.checkpoint_path, args.policy_config)
+    _validate_action_policy_destination(action_policy_manifest, args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if not args.config_only and is_rank0():
         # Re-export into the same -o dir: drop artifacts a prior export may have
@@ -392,6 +451,7 @@ def export_model(args: Args) -> None:
         if is_edge and model_dict["config"].get("action_gen")
         else None
     )
+    _validate_edge_policy_metadata(action_policy_manifest, edge_policy_metadata)
     if not args.vit:
         # Text/gen-only export: write include_visual=False into the exported model
         # config so inference skips visual-tower construction instead of dying on
@@ -557,13 +617,16 @@ def export_model(args: Args) -> None:
         # manifest must not leak them through 'export_args' either. The
         # repo@revision provenance in '*_source' stays untouched.
         export_args = sanitize_export_args(export_args)
-    manifest = build_export_manifest(
+    export_manifest = build_export_manifest(
         vision_tower_source=vision_tower_source,
         processor_source=processor_source,
         export_args=export_args,
         framework_commit=read_framework_commit(),
     )
-    serialize_config_dict(manifest, args.output_dir / "export_manifest.json")
+    serialize_config_dict(export_manifest, args.output_dir / "export_manifest.json")
+
+    if action_policy_manifest is not None:
+        save_action_policy_manifest(action_policy_manifest, args.output_dir / "action_policy.yaml")
 
     # Write 'checkpoint.json' last to indicate that the model is complete.
     checkpoint_metadata = (

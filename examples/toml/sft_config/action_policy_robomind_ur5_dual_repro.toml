@@ -1,0 +1,51 @@
+# UR5e post-training — local addition, not part of upstream Cosmos3.
+
+# ============================================================================
+# RoboMIND UR5(e) DUAL-ARM action-policy SFT — run config for the
+# `action_policy_robomind_ur5_dual_nano` experiment (14-D joint_pos, secondary case;
+# not directly runnable on the single-arm RoboLab). Recipe knobs live in the
+# registered experiment; this file sets run-level scalars.
+#
+# Env required:
+#   UR5_DUAL_ROOT=/path/to/robomind_ur5_dual_lerobot/success  # RoboMIND 2.0 -> LeRobot v3
+#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
+#   WAN_VAE_PATH=<Wan2.2_VAE.pth>
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_robomind_ur5_dual_nano"
+project      = "cosmos3_action"
+group        = "action_sft"
+name         = "action_policy_robomind_ur5_dual_repro"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[scheduler]
+cycle_lengths = [10000]
+
+[trainer]
+max_iter     = 10000
+logging_iter = 50
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1000
+
+# lr=2e-4 targets the ~8192 global batch of the full multi-node shape; scale down for single-node
+# (see the single-case TOML note). Reduce per-rank batch on low-memory GPUs:
+#   --opts dataloader_train.max_samples_per_batch=32

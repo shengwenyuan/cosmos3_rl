@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# ============================================================================
+# DROID action-policy SFT — run config for the `action_policy_droid_nano`
+# experiment. Reproduces the Cosmos3-Nano-Policy-DROID reference run:
+# HSDP 32x8, global batch 8192, lr 2e-4, loss_scale 10, 10000 iters. The
+# remaining recipe knobs (grad_clip, count-based batch, action-head
+# skip-on-load, dataset knobs) live in the registered experiment; this file
+# pins the run-level scalars that define the reference reproduction.
+#
+# Env required:
+#   DROID_ROOT=/path/to/Cosmos3-DROID/success
+#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
+#   WAN_VAE_PATH=<Wan2.2_VAE.pth>
+#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root   # persist checkpoints
+# ============================================================================
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_droid_nano"
+project      = "cosmos3_action"
+group        = "action_sft"
+name         = "action_policy_droid_repro"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8     # 8-GPU model shard
+data_parallel_replicate_degree = 32    # HSDP 32x8 = 256 ranks (GB200 reference: 64 nodes x 4)
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[model.rectified_flow_training_config]
+loss_scale = 10.0    # generator (diffusion) loss weight, reference value
+
+[optimizer]
+lr = 2.0e-04
+
+[scheduler]
+cycle_lengths = [100000]   # long cosine cycle: lr decays slowly across the 10000-iter run
+
+[dataloader_train]
+max_samples_per_batch = 32   # samples packed into each per-rank batch (res480)
+
+[dataloader_train.dataloader]
+num_workers     = 16   # decode-worker throughput tuning; adjust to host CPU count
+batch_size      = 16
+prefetch_factor = 2
+
+[trainer]
+max_iter        = 10000
+logging_iter    = 50
+grad_accum_iter = 1       # global batch = max_samples 32 x (shard 8 x replicate 32) x 1 = 8192
+
+[trainer.callbacks.compile_tokenizer]
+enabled            = true      # torch.compile the Wan VAE tokenizer (speed); warms up at res480
+warmup_resolutions = ["480"]
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1000
+
+[action_policy]
+schema_version = 1
+profile_id      = "droid_joint_15hz_c32"
+robot           = "droid"
+domain_name     = "droid_lerobot"
+policy_fps      = 15
+chunk_size      = 32
+
+[action_policy.model_action]
+codec          = "joint_position"
+layout         = ["joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper"]
+representation = "absolute"
+
+[action_policy.model_action.gripper]
+index     = 7
+semantics = "open_fraction"
+
+[action_policy.wire_action]
+codec          = "joint_position"
+layout         = ["joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper"]
+representation = "absolute"
+
+[action_policy.wire_action.gripper]
+index     = 7
+semantics = "close_fraction"
+
+[action_policy.conditioning]
+state_rows   = 1
+history_rows = 1
+source       = "current_state"
+timing       = "row 0 is observation state at t0; rows 1..32 are future absolute joint targets"
+
+[action_policy.observation]
+layout_id           = "primary_top_aux_bottom_pair"
+view_shape_hw       = [360, 640]
+canvas_shape_hw     = [540, 640]
+view_roles          = ["primary", "aux_left", "aux_right"]
+missing_view_policy = "error"
+viewpoint            = "concat_view"
+description          = "One primary view fills the top row; two ordered auxiliary slots share the bottom row."
+
+[action_policy.transform]
+resolution                     = "480"
+max_action_dim                 = 64
+action_channel_masking         = true
+append_viewpoint_info          = true
+append_duration_fps_timestamps = true
+append_resolution_info         = true
+append_idle_frames             = false
+format_prompt_as_json          = true
+
+[action_policy.normalization]
+kind = "none"
+
+[[action_policy.datasets]]
+name               = "cosmos3_droid_success_640x360_v1"
+root               = "${oc.env:DROID_ROOT}"
+condition_source   = "observation_state_t0"
+action_features    = ["action.joint_position", "action.gripper_position"]
+state_features     = ["observation.state.joint_positions", "observation.state.gripper_position"]
+camera_features    = { primary = "observation.image.wrist_image_left", aux_left = "observation.image.exterior_image_1_left", aux_right = "observation.image.exterior_image_2_left" }
+action_layout      = ["joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper"]
+gripper_semantics  = "close_fraction"
+description        = "The public success source stores close_fraction; its explicit dataset profile converts action/state once to the released DROID model convention, open_fraction."
+view_description   = "The top row is from the wrist-mounted camera. The bottom row contains two horizontally concatenated third-person perspective views of the scene from opposite sides, with the robot visible."
+
+# The 256-rank HSDP 32x8 shape (global batch 8192) is the GB200 reference. To fit
+# fewer GPUs while keeping global batch 8192, lower data_parallel_replicate_degree
+# and raise grad_accum_iter at launch — e.g. one 8-GPU node:
+#   --opts model.parallelism.data_parallel_replicate_degree=1 trainer.grad_accum_iter=32

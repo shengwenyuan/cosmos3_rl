@@ -1,0 +1,58 @@
+schema_version: 1
+profile_id: droid_joint_15hz_c32
+robot: droid
+domain_name: droid_lerobot
+policy_fps: 15
+chunk_size: 32
+model_action:
+  codec: joint_position
+  layout: [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6, gripper]
+  representation: absolute
+  gripper:
+    index: 7
+    semantics: open_fraction
+wire_action:
+  codec: joint_position
+  layout: [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6, gripper]
+  representation: absolute
+  gripper:
+    index: 7
+    semantics: close_fraction
+conditioning:
+  state_rows: 1
+  history_rows: 1
+  source: current_state
+  timing: row 0 is current joint/gripper state; rows 1..32 are future absolute targets
+observation:
+  layout_id: primary_top_aux_bottom_pair
+  view_shape_hw: [360, 640]
+  canvas_shape_hw: [540, 640]
+  view_roles: [primary, aux_left, aux_right]
+  missing_view_policy: error
+  viewpoint: concat_view
+  description: One primary view fills the top row; two ordered auxiliary slots share the bottom row.
+transform:
+  resolution: "480"
+  max_action_dim: 64
+  action_channel_masking: true
+  append_viewpoint_info: true
+  append_duration_fps_timestamps: true
+  append_resolution_info: true
+  append_idle_frames: false
+  format_prompt_as_json: true
+normalization:
+  kind: none
+datasets:
+  - name: droid_lerobot_release
+    root: artifact-defined
+    condition_source: observation_state_t0
+    action_features: [action]
+    state_features: [observation.state]
+    camera_features:
+      primary: observation.images.wrist_image
+      aux_left: observation.images.exterior_image_1_left
+      aux_right: observation.images.exterior_image_2_left
+    action_layout: [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6, gripper]
+    gripper_semantics: open_fraction
+    description: Published Cosmos3 Nano DROID joint-position policy; the model-side historical gripper channel is open_fraction and is converted once at the server boundary.
+    view_description: The top row is from the wrist-mounted camera. The bottom row contains two horizontally concatenated third-person perspective views of the scene from opposite sides, with the robot visible.
