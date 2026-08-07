@@ -25,6 +25,11 @@ class DataSetting:
 @attrs.define(slots=False)
 class Config(config.Config):
     data_setting: DataSetting = attrs.field(factory=DataSetting)
+    # cosmos3_rl extension fields. Declaring them on the typed VFM config keeps
+    # Hydra construction strict while allowing manifest ownership to survive
+    # config serialization and resume.
+    action_policy: dict[str, Any] | None = None
+    requires_action_policy_manifest: bool = False
     defaults: List[Any] = attrs.field(
         factory=lambda: [
             "_self_",

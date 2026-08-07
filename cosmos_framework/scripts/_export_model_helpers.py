@@ -402,16 +402,36 @@ def build_export_manifest(
 
 
 def read_framework_commit(start: Path | None = None) -> str | None:
-    """Resolve the framework git commit by reading '.git' files (no subprocess).
+    """Resolve the framework git commit by reading '.git' metadata.
 
-    Returns None outside a git worktree (e.g. a pip-installed package).
+    Supports both ordinary repositories, where ``.git`` is a directory, and
+    linked worktrees, where ``.git`` is a ``gitdir: ...`` pointer file. Returns
+    None outside a git worktree (for example, from a pip-installed package).
     """
     current = (start or Path(__file__)).resolve()
     for parent in [current, *current.parents]:
-        git_dir = parent / ".git"
-        if git_dir.is_dir():
+        git_dir = _resolve_git_dir(parent / ".git")
+        if git_dir is not None:
             return _read_git_head(git_dir)
     return None
+
+
+def _resolve_git_dir(dot_git: Path) -> Path | None:
+    if dot_git.is_dir():
+        return dot_git
+    if not dot_git.is_file():
+        return None
+    try:
+        pointer = dot_git.read_text().strip()
+    except OSError:
+        return None
+    if not pointer.startswith("gitdir:"):
+        return None
+    git_dir = Path(pointer.removeprefix("gitdir:").strip())
+    if not git_dir.is_absolute():
+        git_dir = dot_git.parent / git_dir
+    git_dir = git_dir.resolve()
+    return git_dir if git_dir.is_dir() else None
 
 
 def _read_git_head(git_dir: Path) -> str | None:
@@ -422,12 +442,23 @@ def _read_git_head(git_dir: Path) -> str | None:
     if not head.startswith("ref:"):
         return head or None
     ref = head.removeprefix("ref:").strip()
-    ref_file = git_dir / ref
-    if ref_file.is_file():
-        return ref_file.read_text().strip() or None
-    packed_refs = git_dir / "packed-refs"
-    if packed_refs.is_file():
-        for line in packed_refs.read_text().splitlines():
-            if line.endswith(f" {ref}"):
-                return line.split(" ", 1)[0]
+    ref_roots = [git_dir]
+    commondir_file = git_dir / "commondir"
+    if commondir_file.is_file():
+        try:
+            common_dir = Path(commondir_file.read_text().strip())
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+            ref_roots.append(common_dir.resolve())
+        except OSError:
+            pass
+    for ref_root in ref_roots:
+        ref_file = ref_root / ref
+        if ref_file.is_file():
+            return ref_file.read_text().strip() or None
+        packed_refs = ref_root / "packed-refs"
+        if packed_refs.is_file():
+            for line in packed_refs.read_text().splitlines():
+                if line.endswith(f" {ref}"):
+                    return line.split(" ", 1)[0]
     return None

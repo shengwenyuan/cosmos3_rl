@@ -111,6 +111,13 @@ SOURCE_GRIPPER_SEMANTICS = {
     "droid_plus_lerobot_640x360_20260412": "close_fraction",
 }
 
+# Backward-compatible boolean surface used by the upstream merged-DROID
+# adapter. Keep it derived from the explicit semantics table so the two APIs
+# cannot drift.
+IS_GRIPPER_ACTION_FLIPPED = {
+    profile: semantics == "close_fraction" for profile, semantics in SOURCE_GRIPPER_SEMANTICS.items()
+}
+
 _JOINT_ACTION_FEATURE = "action.joint_position"
 _JOINT_STATE_FEATURE = "observation.state.joint_positions"
 _GRIPPER_STATE_FEATURE = "observation.state.gripper_position"

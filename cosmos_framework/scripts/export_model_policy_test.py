@@ -9,9 +9,10 @@ from cosmos_framework.data.generator.action.policy_schema import (
     load_action_policy_manifest,
     save_action_policy_manifest,
 )
-from cosmos_framework.scripts.export_model import (
-    _resolve_action_policy_manifest,
-    _validate_action_policy_destination,
+from cosmos_framework.scripts.action_policy_export import (
+    resolve_action_policy_manifest,
+    validate_action_policy_destination,
+    validate_edge_policy_metadata,
 )
 
 pytestmark = pytest.mark.level(0)
@@ -26,7 +27,7 @@ def test_export_rejects_explicit_manifest_that_conflicts_with_checkpoint_owner(t
     save_action_policy_manifest(owned, tmp_path / "run" / "action_policy.yaml")
 
     with pytest.raises(ValueError, match="conflicts with"):
-        _resolve_action_policy_manifest(str(checkpoint), conflicting)
+        resolve_action_policy_manifest(str(checkpoint), conflicting)
 
 
 def test_export_rejects_stale_destination_before_writing(tmp_path: Path) -> None:
@@ -37,4 +38,19 @@ def test_export_rejects_stale_destination_before_writing(tmp_path: Path) -> None
     save_action_policy_manifest(stale, output / "action_policy.yaml")
 
     with pytest.raises(ValueError, match="different exported"):
-        _validate_action_policy_destination(source, output)
+        validate_action_policy_destination(source, output)
+
+
+def test_export_rejects_edge_checkpoint_metadata_drift() -> None:
+    repo = Path(__file__).parents[2]
+    manifest = load_action_policy_manifest(repo / "examples/toml/sft_config/action_policy_ur5_single_joint_overfit.toml")
+
+    with pytest.raises(ValueError, match="official Edge checkpoint metadata"):
+        validate_edge_policy_metadata(
+            manifest,
+            {
+                "action_chunk_size": manifest.chunk_size,
+                "conditioning_fps": float(manifest.policy_fps),
+                "domain_name": "droid_lerobot",
+            },
+        )
