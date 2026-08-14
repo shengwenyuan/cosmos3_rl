@@ -102,6 +102,7 @@ def make_config() -> Config:
     # UR5 post-training extensions retained by cosmos3_rl.
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_berkeley_ur5_eef_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_nano  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_fd_droid_posttrain  # noqa: F401
