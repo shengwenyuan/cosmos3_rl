@@ -1,0 +1,9 @@
+# Keep large/runtime artifacts out of the repository.
+runtime/
+cache/
+models/
+datasets/
+checkpoints/
+runs/
+manifests/private/
+*.log

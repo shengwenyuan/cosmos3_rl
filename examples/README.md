@@ -19,3 +19,5 @@ This directory contains:
 | Reasoner Alignment SFT (Cosmos3-Nano)        | `launch_sft_videophy2_nano.sh`        |
 | Reasoner Alignment SFT (Cosmos3-Super)       | `launch_sft_videophy2_super.sh`       |
 | Reasoner Alignment SFT (Cosmos3-Edge)        | `launch_sft_videophy2_edge.sh`        |
+| LIBERO-all Action SFT (Edge, 8 GPU)           | `launch_sft_action_policy_libero_all_edge_8gpu.sh` |
+| LIBERO-all Action SFT (Edge, 4 GPU)           | `launch_sft_action_policy_libero_all_edge_4gpu.sh` |

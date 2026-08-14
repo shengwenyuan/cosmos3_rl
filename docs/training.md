@@ -176,6 +176,8 @@ LIBERO (`frame_wise_relative` rot6d 10-D actions), both from Cosmos3-Nano. They 
   `examples/launch_sft_action_policy_droid_nano.sh`
 - [LIBERO action policy](./action_policy_libero_posttrain.md) —
   `examples/launch_sft_action_policy_libero_10_nano.sh` / `examples/launch_sft_action_policy_libero_all_nano.sh`
+- [LIBERO-all action policy (Cosmos3-Edge)](./action_policy_libero_edge_posttrain.md) —
+  `examples/launch_sft_action_policy_libero_all_edge_8gpu.sh` / `examples/launch_sft_action_policy_libero_all_edge_4gpu.sh`
 
 </details>
 
