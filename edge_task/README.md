@@ -26,6 +26,8 @@
 - [Edge-LIBERO recipe](../docs/action_policy_libero_edge_posttrain.md)：8 卡/4 卡拓扑、资产准备、smoke 和正式启动命令。
 - [env.example.sh](./env.example.sh)：不含凭据的环境变量模板。
 - [configure_bashrc.sh](./configure_bashrc.sh)：校验 `/mnt/cfs/data/swy/personal/wandb` 的两行凭据、收紧权限为 `0600`，并在 `.bashrc` 顶部安装 5 行环境配置 block。
+- [run_edge_libero.sh](./run_edge_libero.sh)：单节点 8 卡入口；默认正式训练，设置 `EDGE_LIBERO_MODE=smoke` 时仅跑 5 iter 无 W&B smoke。
+- [run_edge_libero_4gpu.sh](./run_edge_libero_4gpu.sh)：对应的单节点 4 卡入口，使用相同的 `train|smoke` 模式。
 - [verify_environment.sh](./verify_environment.sh)：不下载资源、不修改 `/mnt` 的验收脚本。
 - [nccl_smoke.py](./nccl_smoke.py)：由 `torchrun` 调用的单机多卡 NCCL all-reduce smoke。
 - [prepare_edge_dcp.sh](./prepare_edge_dcp.sh)：从完整 Edge HF base 离线转换并原子落盘到个人 CFS。
