@@ -101,7 +101,7 @@ does not save a checkpoint in five iterations.
 ```bash
 bash edge_task/verify_environment.sh
 
-EXTRA_TAIL_OVERRIDES="trainer.max_iter=5 checkpoint.save_iter=999999 job.wandb_mode=disabled" \
+EXTRA_TAIL_OVERRIDES="trainer.max_iter=5 checkpoint.save_iter=999999 checkpoint.save_last_checkpoint=false job.wandb_mode=disabled" \
   bash examples/launch_sft_action_policy_libero_all_edge_8gpu.sh
 ```
 

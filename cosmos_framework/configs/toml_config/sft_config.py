@@ -621,6 +621,10 @@ class CheckpointConfig(BaseModel):
         default=100,
         description="Save a new checkpoint every N optimizer steps.",
     )
+    save_last_checkpoint: bool = Field(
+        default=True,
+        description="Save the final optimizer step when it is not already a periodic checkpoint.",
+    )
 
 
 # ---------------------------------------------------------------- dataloader_train
