@@ -461,6 +461,8 @@ class ActionServerArgs(pydantic.BaseModel):
     """Number of denoising steps."""
     fps: int = 20
     """Frames per second used for both prompt augmentation and rollout encoding."""
+    guardrails: bool = False
+    """Enable inference guardrails. Disabled by default for closed-loop policy evaluation."""
 
     # ----- action policy parameters -------------------------------------------
     action_chunk_size: int | None = None
@@ -522,6 +524,7 @@ class ActionServerArgs(pydantic.BaseModel):
         base = OmniSetupOverrides.model_validate(self.checkpoint.model_dump())
         base.output_dir = output_dir
         base.sampler = self.sampler
+        base.guardrails = self.guardrails
         return base
 
 
