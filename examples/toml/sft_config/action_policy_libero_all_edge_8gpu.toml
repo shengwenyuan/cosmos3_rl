@@ -3,7 +3,7 @@
 
 # Cosmos3-Edge full LIBERO four-suite SFT on one 8-GPU RPBZZZ6 node.
 # Effective global batch = 128 samples/rank x 8 ranks x grad_accum 2 = 2048.
-# Required env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH,
+# Required env: LIBERO_ROOT, EDGE_BASE_PATH, BASE_CHECKPOINT_PATH, WAN_VAE_PATH,
 # IMAGINAIRE_OUTPUT_ROOT. See docs/action_policy_libero_edge_posttrain.md.
 
 [job]

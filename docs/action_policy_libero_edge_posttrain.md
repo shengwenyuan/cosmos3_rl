@@ -45,14 +45,20 @@ directories, not a single suite.
 Download the public Edge snapshot and convert it to DCP once:
 
 ```bash
+export HF_ENDPOINT=https://huggingface.co
+
 hf download nvidia/Cosmos3-Edge \
   --revision 6f58f6b4c91288838e60b6bcb2cc45d997e961de \
-  --local-dir /path/to/assets/Cosmos3-Edge
+  --local-dir /mnt/cfs/data/swy/cosmos3/models/Cosmos3-Edge
 
-python -m cosmos_framework.scripts.convert_model_to_dcp \
-  -o /path/to/checkpoints/Cosmos3-Edge \
-  --checkpoint-path /path/to/assets/Cosmos3-Edge
+bash edge_task/prepare_edge_dcp.sh
 ```
+
+The user explicitly approved the official Hugging Face endpoint after hf-mirror
+returned HTTP 308 redirects. The pinned snapshot and converted DCP now live in
+the user's CFS tree. A separately downloaded, byte/SHA-matched replica is at
+`/mnt/bos/1011/models/Cosmos3-Edge`; runtime training should still use the CFS
+paths offline.
 
 Download the four-suite training dataset:
 
@@ -60,19 +66,31 @@ Download the four-suite training dataset:
 hf download nvidia/LIBERO_LeRobot_v3 \
   --repo-type dataset \
   --revision ddc1edeb6e51e2b7d4d2ba7a1433daaecd37aa64 \
-  --local-dir /path/to/datasets/LIBERO_LeRobot_v3
+  --include 'libero_10/**' 'libero_goal/**' 'libero_object/**' 'libero_spatial/**' \
+  --local-dir /mnt/cfs/data/swy/libero/LIBERO_LeRobot_v3
 ```
 
-Export the runtime paths. The Wan2.2 VAE may remain on a read-only shared
-mount; checkpoints, logs, caches, and outputs must be writable.
+The current CFS copy contains only the four listed suites: 38 payload files,
+1,867,646,269 bytes, all pinned to the revision above. Its full size and
+SHA-256 manifests are under `/mnt/cfs/data/swy/libero/manifests/`; parquet
+metadata and both 256×256 video views have been read successfully for every
+suite.
+
+Export the runtime paths. Runtime training must read all model assets from CFS;
+the BOS copies are migration/archive sources only.
 
 ```bash
 export LD_LIBRARY_PATH=''
-export LIBERO_ROOT=/path/to/datasets/LIBERO_LeRobot_v3
-export BASE_CHECKPOINT_PATH=/path/to/checkpoints/Cosmos3-Edge
-export WAN_VAE_PATH=/mnt/bos/1011/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
-export IMAGINAIRE_OUTPUT_ROOT=/path/to/outputs/cosmos3-edge-libero
+export LIBERO_ROOT=/mnt/cfs/data/swy/libero/LIBERO_LeRobot_v3
+export EDGE_BASE_PATH=/mnt/cfs/data/swy/cosmos3/models/Cosmos3-Edge
+export BASE_CHECKPOINT_PATH=/mnt/cfs/data/swy/cosmos3/checkpoints/Cosmos3-Edge-DCP
+export WAN_VAE_PATH=/mnt/cfs/data/swy/cosmos3/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
+export IMAGINAIRE_OUTPUT_ROOT=/mnt/cfs/data/swy/cosmos3/runs
 ```
+
+`EDGE_BASE_PATH` remains required after DCP conversion because it supplies the
+tokenizer/processor assets; the recipe reads it locally and does not resolve the
+floating Hub `main` revision at training startup.
 
 ## Preflight and launch
 
@@ -104,6 +122,11 @@ not configured.
 The launchers set `NPROC_PER_NODE` themselves; they do not depend on changing
 the container's `docker run` command. They fail early if any suite, the Edge
 DCP, or the VAE is missing.
+
+The 4-GPU path completed a five-iteration smoke on 2026-08-15 with four
+RPBZZZ6 GPUs. All ranks completed finite-loss forward/backward/optimizer steps;
+steady-state iterations took about 30–31 seconds. The run is under
+`/mnt/cfs/data/swy/cosmos3/runs/cosmos3_action_libero/smoke/`.
 
 ## Memory fallback
 
