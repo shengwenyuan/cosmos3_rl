@@ -444,13 +444,33 @@ cosmos_framework/data/generator/action/normalizer_stats/
 
 ## 10. 阶段 H：LIBERO HTTP server 与 simulator 环境边界
 
-已训练 checkpoint 尚不存在，因此当前只能验证接口环境：
+独立 simulator 环境已安装到
+`/mnt/cfs/data/swy/libero/envs/libero-eval`，使用 uv 管理的 Python 3.10.20。
+官方 LIBERO 源码固定为 commit
+`8f1084e3132a39270c3a13ebe37270a43ece2a01`，位于
+`/mnt/cfs/data/swy/libero/LIBERO`；配置位于
+`/mnt/cfs/data/swy/libero/config/config.yaml`。核心版本为 robosuite 1.4.1、
+MuJoCo 2.3.7、torch 2.5.1+cu124、NumPy 1.22.4、SciPy 1.10.1 和
+OpenCV 4.6.0。由于 venv 位于 CFS，`robosuite/macros_private.py` 已关闭
+Numba 源码旁 cache。
 
-- 主 venv 中 `action_policy_server_libero --help` 和配置解析成功。
-- simulator venv 中能创建一个 headless LIBERO env、reset、执行随机/零 action、渲染 agentview+wrist。
-- client 能访问一个 mock `/info`、`/predict` endpoint，证明网络/JSON/base64 路径可用。
+当前已通过 `uv pip check`、四 suite benchmark 枚举、OffScreenRenderEnv import，
+并实际创建 LIBERO-10 task 0 的 headless EGL 环境：reset 得到 agentview/wrist
+两路 64×64 RGB 图像，执行一步 dummy action 后正常关闭。训练所需
+`LIBERO_LeRobot_v3` 不等于 simulator 的 BDDL/init/assets；后者来自上述官方
+LIBERO 仓库。
 
-正式训练完成后再用实际 Edge-LIBERO checkpoint 启动 HTTP server。server 接受 DCP + matching config，或导出的 safetensors（`action_policy_server_libero.py:13-33`）。评测 parity 必须保持：20 FPS、concat view、256×256 双相机、frame-wise relative rot6d、quantile_rot；见 `docs/action_policy_libero_posttrain.md:139-148`。
+首个已训练 checkpoint `iter_000000500` 的同机 server-client smoke 已通过。
+GPU 0 直接加载 8-way 训练 DCP 和 matching `config.yaml`，GPU 1 运行 EGL client；
+LIBERO-10 task 0 的 2 个短 episode 共完成 4 次真实 `/predict`。每次均发送
+agentview+wrist 的 256×512 concat observation，并返回 16×10 有限 action chunk；
+client 转为 7D simulator action 后执行到设定的 32 steps，保存两份 33-frame GIF
+和 `summary.json`。8-step sampler 的首请求含 compile 约 36 秒，稳态 HTTP 总耗时
+约 0.62 秒/请求、模型推理约 0.24–0.25 秒。短 horizon 下 0/2 success 只证明链路，
+不作为 checkpoint SR。server 接受 DCP + matching config，或导出的 safetensors
+（`action_policy_server_libero.py:13-33`）。正式评测 parity 必须保持：20 FPS、
+concat view、256×256 双相机、frame-wise relative rot6d、quantile_rot；见
+`docs/action_policy_libero_posttrain.md:139-148`。
 
 ## 11. 完成矩阵
 
@@ -459,14 +479,14 @@ cosmos_framework/data/generator/action/normalizer_stats/
 | G0 代码 | 官方基线 + recipe commit；Edge config、LIBERO loader/server/eval 存在 | 通过：基线 `c3493f3`，recipe `8e3b66b`；最终镜像另记实际 HEAD |
 | G1 存储 | CFS 个人根目录；全量训练目标 ≥1 TiB | 通过：CFS 约 10 PiB 可用；BOS 第二份 Edge 副本也已校验 |
 | G2 训练 uv | `cu130-train` 425 包、Python 3.13.12、imports/pip check | 通过；仅 `jupyter-compare-view` 的 Python `<3.13` 元数据为非训练阻断告警 |
-| G2b simulator | 独立 `/opt/libero-venv`，imports/headless EGL | 未完成 |
+| G2b simulator | 独立 CFS venv，imports/headless EGL | 通过：真实 env reset、双路 render、dummy step |
 | G3 GPU | 实际任务 4 GPU、BF16、NCCL、shared memory | 当前开发机通过 4 GPU/BF16/4-rank NCCL/shm；8-GPU 正式任务复验 |
 | G4 Edge base | CFS 固定 revision、manifest、离线 processor/index load | 通过：CFS/BOS 各 54 文件、9,198,075,487 bytes；size/关键 SHA256 一致 |
 | G5 Edge DCP | 转换、单/4 rank load、key manifest | 通过：DCP 已生成，单 rank 与 4-rank smoke warm-start 均通过 |
 | G6 LIBERO data | 四 suite、20 FPS、decode/loader batch | 通过：静态/完整 SHA/PyArrow/PyAV 与真实 4-rank loader batch 均通过 |
 | G7 VAE | CFS load + sample encode | 通过：VAE 已迁移并在真实训练 forward 中完成 encode |
 | G8 组合 smoke | Edge DCP + VAE + 四-suite样本 + 1/4 GPU step | 4-GPU 通过：5/5 iterations、exit 0；1-GPU 独立 smoke 未做 |
-| G9 eval client | 独立 venv、headless env/reset/render、HTTP mock | 未完成 |
+| G9 eval client | 独立 venv、headless env/reset/render、实际 policy HTTP smoke | 通过：iter 500、2 episodes、4 次真实 predict、action/GIF/summary 完整 |
 
 G0-G9 全部通过后，环境拼装才算完成；随后冻结镜像/资产 manifest 并提交正式训练任务。
 
@@ -480,6 +500,6 @@ G0-G9 全部通过后，环境拼装才算完成；随后冻结镜像/资产 man
 6. **已完成**：数据下载、静态验收、逐 suite parquet/双路视频 decode 和真实 loader batch。
 7. **已完成**：迁移 CFS VAE，并在真实样本训练中完成 encode。
 8. **4-GPU 已完成**：5-step 组合 smoke；若需要额外隔离诊断再补 1-GPU smoke。
-9. 完成独立 LIBERO simulator/client smoke。
+9. **已完成**：独立 LIBERO venv、真实 headless reset/render/step，以及 `iter_000000500` 同机 server-client smoke。
 10. 冻结环境基线：image digest、repo commit、uv.lock hash、HF revisions、DCP/data/VAE manifests。
 11. 按 8 卡或 4 卡正式 recipe 提交全量训练。
