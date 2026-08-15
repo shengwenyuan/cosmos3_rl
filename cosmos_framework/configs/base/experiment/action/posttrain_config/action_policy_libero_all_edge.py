@@ -23,6 +23,7 @@ from cosmos_framework.data.generator.joint_dataloader import (
     PackingDataLoader,
     RankPartitionedDataLoader,
 )
+from cosmos_framework.data.generator.processors import build_processor_lazy
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
 
@@ -39,6 +40,12 @@ def _action_policy_libero_edge_model_config() -> dict:
     cfg["activation_checkpointing"]["mode"] = "selective"
     cfg["diffusion_expert_config"]["load_weights_from_pretrained"] = False
     cfg["tokenizer"]["encode_exact_durations"] = [17, 61, 73]
+    # The DCP stores model weights, not processor assets. Reuse the pinned full
+    # Edge snapshot instead of resolving the recipe's upstream `revision=main`
+    # tokenizer at training startup.
+    cfg["vlm_config"]["tokenizer"] = L(build_processor_lazy)(
+        tokenizer_type="${oc.env:EDGE_BASE_PATH}",
+    )
     return cfg
 
 
