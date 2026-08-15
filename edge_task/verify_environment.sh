@@ -59,7 +59,25 @@ for variable_name in UV_CACHE_DIR HF_HOME IMAGINAIRE_OUTPUT_ROOT; do
     fi
 done
 
-VAE_PATH="${WAN_VAE_PATH:-/mnt/bos/1011/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}"
+if [[ "${HF_ENDPOINT:-}" == "https://huggingface.co" ]]; then
+    pass "HF_ENDPOINT is pinned to the user-approved official Hugging Face endpoint"
+else
+    fail "HF_ENDPOINT must be exactly https://huggingface.co"
+fi
+
+if [[ -n "${UV_PROJECT_ENVIRONMENT:-}" && -d "$UV_PROJECT_ENVIRONMENT" ]]; then
+    pass "persistent uv project environment: $UV_PROJECT_ENVIRONMENT"
+else
+    fail "UV_PROJECT_ENVIRONMENT is unset or missing"
+fi
+
+if [[ "${UV_LINK_MODE:-}" == "hardlink" ]]; then
+    pass "UV_LINK_MODE=hardlink for same-CFS cache and venv"
+else
+    warn "UV_LINK_MODE is not hardlink; CFS installation may be very slow"
+fi
+
+VAE_PATH="${WAN_VAE_PATH:-/mnt/cfs/data/swy/cosmos3/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}"
 if [[ -r "$VAE_PATH" ]]; then
     VAE_SIZE="$(stat -c '%s' "$VAE_PATH" 2>/dev/null || true)"
     if [[ "$VAE_SIZE" == "2818839170" ]]; then
@@ -160,19 +178,15 @@ else
     fail "Edge DCP is incomplete: $DCP_PATH"
 fi
 
-DATA_ROOT="${LIBERO_ROOT:-}"
-if [[ -z "$DATA_ROOT" ]]; then
-    fail "LIBERO_ROOT is unset"
-else
-    for suite_name in libero_10 libero_goal libero_object libero_spatial; do
-        suite_path="$DATA_ROOT/$suite_name"
-        if [[ -f "$suite_path/meta/info.json" && -d "$suite_path/data" && -d "$suite_path/videos" ]]; then
-            pass "LIBERO suite structure: $suite_name"
-        else
-            fail "LIBERO suite is incomplete: $suite_path"
-        fi
-    done
-fi
+DATA_ROOT="${LIBERO_ROOT:-/mnt/cfs/data/swy/libero/LIBERO_LeRobot_v3}"
+for suite_name in libero_10 libero_goal libero_object libero_spatial; do
+    suite_path="$DATA_ROOT/$suite_name"
+    if [[ -f "$suite_path/meta/info.json" && -d "$suite_path/data" && -d "$suite_path/videos" ]]; then
+        pass "LIBERO suite structure: $suite_name"
+    else
+        fail "LIBERO suite is incomplete: $suite_path"
+    fi
+done
 
 if [[ -n "${LIBERO_PYTHON:-}" && -x "$LIBERO_PYTHON" ]]; then
     SIM_PYTHON="$LIBERO_PYTHON"
