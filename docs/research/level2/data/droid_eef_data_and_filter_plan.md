@@ -30,15 +30,20 @@ Nano Policy 对齐过滤文件：
 
 ## 3. 官方 filter 后规模
 
-基于官方 `success/meta` 与当前加载器的 `[start, end)` 语义：
+基于 revision `5c11a20...` 的完整 `success/meta` 与当前 loader 的 `[start, end)` 语义重新核对。当前 loader 每条样本读取 33 observation frames 并监督 32 future actions，因此 range 长度为 `L` 时可训练 window 数为 `max(0, L - 32)`，不能再额外 `+1`。
 
 | 指标 | 数值 |
 |---|---:|
-| filter 命中 episodes | 56,715 |
-| 保留 ranges | 75,558 |
+| filter key 命中 episode rows | 56,804 |
+| filter 原始 ranges | 75,558 |
+| 可形成完整窗口的 episodes | 56,687 |
+| 可形成完整窗口的 ranges | 68,494 |
 | 保留 frames | 14,856,095 |
-| 可用 16-step windows | 13,735,276（原 success 的 77.05%） |
-| 可用 32-step windows | 12,606,835（原 success 的 74.57%） |
+| loader-effective 32-step windows | 12,538,157 |
+
+旧探针报告的 12,606,835 使用了 `L - 32 + 1`，等价于只要求 32 source frames；它与 `observation_ts=0..32` 的 33-frame 合同冲突，只保留为 legacy diagnostic，不作为训练计数或门禁。旧的 56,715 episode 数也无法从当前固定 revision 的 filter-hit、完整 32-step 或 legacy-inclusive 任一口径复现，已撤销。
+
+16-step 与 F1/F3 规模须由新工具按 loader-effective 口径重新生成；本节不沿用旧 inclusive probe 数值。
 
 ## 4. 二次筛选建议
 
@@ -69,7 +74,7 @@ Nano Policy 对齐过滤文件：
 - 对高频任务设上限，对 push/pull 等少数族设最低配额。
 - 生成 `easy_v1_train.jsonl`、`easy_v1_val.jsonl` 和汇总表；split 必须在采样窗口前按 episode/场景分组完成。
 
-F1 约 465 万个 32-step windows；若每 episode 封顶 64，理论上限约 202 万，可显著减少一轮训练的重复样本与 I/O。chunk 16 备选约有 522 万个 windows。
+旧 F1 粗探针约 465 万个 32-step windows；该数字尚未按 loader-effective 口径复算。每 episode 封顶 64 的理论上限约 202 万仍可用于资源上界，最终训练步数只读取新版 manifest summary。
 
 ### F4：人工复核
 
