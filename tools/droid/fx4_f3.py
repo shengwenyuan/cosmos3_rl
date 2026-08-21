@@ -206,6 +206,10 @@ def build_f3(
     records: list[dict[str, Any]] = []
     gap_probe_counts: collections.Counter[int] = collections.Counter()
     event_counts: collections.Counter[str] = collections.Counter()
+    waypoint_retained_frames = 0
+    waypoint_source_frames = 0
+    waypoint_complete_windows = 0
+    waypoint_chunk_durations: list[float] = []
     for episode_index, f2_record in sorted(f2_records.items()):
         trajectory = trajectories[episode_index]
         accepted_ranges = [item for item in f2_record["ranges"] if item.get("f2_status") == "accepted"]
@@ -227,6 +231,17 @@ def build_f3(
                 gap_probe_counts[gap] += len(
                     candidate_window_starts(trajectory, start=start32, stop=stop32, config=config, max_gap_frames=gap)
                 )
+            waypoint_candidates = candidate_window_starts(
+                trajectory, start=start32, stop=stop32, config=config, max_gap_frames=10**9
+            )
+            waypoint_indices = [int(item["start"]) for item in waypoint_candidates]
+            waypoint_retained_frames += len(waypoint_indices)
+            waypoint_source_frames += max(0, stop32 - start32)
+            waypoint_complete_windows += max(0, len(waypoint_indices) - 32)
+            waypoint_chunk_durations.extend(
+                float(trajectory.timestamp[waypoint_indices[index + 32]] - trajectory.timestamp[start])
+                for index, start in enumerate(waypoint_indices[:-32])
+            )
         selected = cap_episode_candidates(main_candidates, config.max_windows_per_episode)
         selected16 = cap_episode_candidates(c16_candidates, config.max_windows_per_episode)
         kept_ranges: list[dict[str, Any]] = []
@@ -275,6 +290,11 @@ def build_f3(
     for record in records:
         record["split"] = split_by_group[record["group_id"]]
     apply_task_cap(records, config)
+    records = [
+        record
+        for record in records
+        if record["split"] == "val" or any(item["selected_window_starts_c32"] for item in record["kept_ranges"])
+    ]
 
     family_counts = collections.Counter(record["task_family"] for record in records if record["split"] == "train")
     largest_family = max(family_counts.values(), default=1)
@@ -315,6 +335,7 @@ def build_f3(
         "continuous_15hz_failures": continuity_failures,
         "all_families_in_val": set(family_counts) <= set(family_split_counts["val"]),
     }
+    waypoint_duration_array = np.asarray(waypoint_chunk_durations, dtype=np.float64)
     summary = {
         "stage": "f3",
         "config": {**config.__dict__, "gap_probe_frames": list(config.gap_probe_frames)},
@@ -324,6 +345,18 @@ def build_f3(
             "families": family_split_counts,
             "gap_probe_candidate_starts": {str(key): value for key, value in sorted(gap_probe_counts.items())},
             "selected_event_reasons": dict(sorted(event_counts.items())),
+            "waypoint_policy_ablation": {
+                "retained_frames": waypoint_retained_frames,
+                "source_candidate_frames": waypoint_source_frames,
+                "retained_frame_ratio": waypoint_retained_frames / waypoint_source_frames,
+                "complete_windows_c32": waypoint_complete_windows,
+                "chunk_duration_s": {
+                    "p05": float(np.quantile(waypoint_duration_array, 0.05)) if waypoint_duration_array.size else 0.0,
+                    "median": float(np.quantile(waypoint_duration_array, 0.5)) if waypoint_duration_array.size else 0.0,
+                    "p95": float(np.quantile(waypoint_duration_array, 0.95)) if waypoint_duration_array.size else 0.0,
+                },
+                "note": "variable-delta-t probe only; not used by the fixed-15Hz manifest",
+            },
         },
         "gates": gates,
         "inputs": inputs,

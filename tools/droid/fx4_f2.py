@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import collections
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,6 +134,14 @@ def trajectory_reason_codes(trajectory: Trajectory, config: F2Config) -> list[st
             reasons.append("timestamp_not_15hz")
     if not np.array_equal(trajectory.frame_index, np.arange(len(trajectory.frame_index))):
         reasons.append("frame_index_not_contiguous")
+    if len(trajectory.timestamp):
+        if not np.allclose(trajectory.raw_xyz[[0, -1]], trajectory.smooth_xyz[[0, -1]], atol=1e-12):
+            reasons.append("smoothing_translation_endpoint_mismatch")
+        endpoint_rotation_error = (
+            trajectory.raw_rotation[[0, -1]].inv() * trajectory.smooth_rotation[[0, -1]]
+        ).magnitude()
+        if np.max(endpoint_rotation_error, initial=0.0) > 1e-12:
+            reasons.append("smoothing_rotation_endpoint_mismatch")
     return reasons
 
 
@@ -372,6 +381,14 @@ def build_f2_motion(
             "kept_windows": kept_windows,
             "rejection_reasons": dict(sorted(reason_counts.items())),
         },
+        "gates": {
+            "finite_pass": reason_counts["non_finite"] == 0,
+            "timestamp_15hz_pass": reason_counts["timestamp_not_monotonic"] == 0
+            and reason_counts["timestamp_not_15hz"] == 0,
+            "frame_index_pass": reason_counts["frame_index_not_contiguous"] == 0,
+            "smoothing_endpoint_pass": reason_counts["smoothing_translation_endpoint_mismatch"] == 0
+            and reason_counts["smoothing_rotation_endpoint_mismatch"] == 0,
+        },
         "inputs": inputs,
         "thresholds_sha256": json_fingerprint(thresholds),
     }
@@ -460,11 +477,41 @@ def sample_freeze_ratio(samples: list[dict[str, Any]], config: F2Config) -> floa
     return float(np.mean(frozen))
 
 
+def decode_full_range_freeze_ratio(
+    path: Path, start_timestamp: float, stop_timestamp: float, config: F2Config
+) -> float | None:
+    """Fully decode a suspicious interval and measure adjacent frozen frames."""
+    try:
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            container.seek(max(0, int(start_timestamp / float(stream.time_base))), stream=stream, backward=True)
+            previous = None
+            comparisons = 0
+            frozen = 0
+            for frame in container.decode(stream):
+                frame_time = float(frame.time or 0.0)
+                if frame_time < start_timestamp - 0.5 / config.fps:
+                    continue
+                if frame_time > stop_timestamp + 0.5 / config.fps:
+                    break
+                image = frame.to_ndarray(format="rgb24")[::10, ::10]
+                if previous is not None:
+                    mad = float(np.mean(np.abs(previous.astype(np.float32) - image.astype(np.float32))))
+                    frozen += mad <= config.frozen_mad_max
+                    comparisons += 1
+                previous = image
+            return float(frozen / comparisons) if comparisons else None
+    except (av.FFmpegError, OSError, ValueError):
+        return None
+
+
 def build_f2_video(
     *, success_root: Path, f2_dir: Path, config: F2Config, limit_episodes: int | None = None
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     motion_path = f2_dir / "f2_motion_episodes.jsonl"
     motion_summary_path = f2_dir / "f2_motion_summary.json"
+    with motion_summary_path.open() as handle:
+        motion_summary = json.load(handle)
     records = [record for record in load_jsonl(motion_path) if record["f2_motion_status"] == "accepted"]
     if limit_episodes is not None:
         records = records[:limit_episodes]
@@ -499,17 +546,24 @@ def build_f2_video(
                     reasons.append(f"video_decode_failure:{camera}")
                 if "black" in statuses:
                     reasons.append(f"video_black_frame:{camera}")
-                freeze_ratio = sample_freeze_ratio(samples, config)
-                if freeze_ratio > config.frozen_ratio_max:
-                    reasons.append(f"video_frozen:{camera}")
+                sample_ratio = sample_freeze_ratio(samples, config)
+                full_freeze_ratio = None
+                if sample_ratio > config.frozen_ratio_max and all(status == "ok" for status in statuses):
+                    full_freeze_ratio = decode_full_range_freeze_ratio(path, timestamps[0], timestamps[-1], config)
+                    if full_freeze_ratio is None:
+                        reasons.append(f"video_full_range_decode_failure:{camera}")
+                    elif full_freeze_ratio > config.frozen_ratio_max:
+                        reasons.append(f"video_frozen:{camera}")
+                max_timestamp_error = max((sample.get("timestamp_error_s", 0.0) for sample in samples), default=0.0)
+                if max_timestamp_error > 0.5 / config.fps + config.timestamp_tolerance_s:
+                    reasons.append(f"video_timestamp_misaligned:{camera}")
                 camera_results[camera] = {
                     "path": str(path),
                     "sample_frames": frames,
                     "statuses": statuses,
-                    "max_timestamp_error_s": max(
-                        (sample.get("timestamp_error_s", 0.0) for sample in samples), default=0.0
-                    ),
-                    "sample_freeze_ratio": freeze_ratio,
+                    "max_timestamp_error_s": max_timestamp_error,
+                    "sample_freeze_ratio": sample_ratio,
+                    "full_freeze_ratio": full_freeze_ratio,
                 }
             status = "accepted" if not reasons else "rejected"
             if status == "accepted":
@@ -532,8 +586,12 @@ def build_f2_video(
             print(f"F2 video progress: {episode_number}/{len(records)} episodes", flush=True)
 
     total_video_samples = sum(camera_sample_counts.values())
-    total_failures = sum(camera_failure_counts.values())
-    decode_failure_rate = total_failures / total_video_samples if total_video_samples else 1.0
+    decode_failures = sum(
+        count
+        for key, count in camera_failure_counts.items()
+        if key.rsplit(":", 1)[-1] in {"missing", "container_failure", "decode_failure"}
+    )
+    decode_failure_rate = decode_failures / total_video_samples if total_video_samples else 1.0
     inputs = {
         "motion_summary": {"path": str(motion_summary_path), "sha256": sha256_file(motion_summary_path)},
         "motion_episodes": {"path": str(motion_path), "sha256": sha256_file(motion_path)},
@@ -551,6 +609,7 @@ def build_f2_video(
             "camera_failures": dict(sorted(camera_failure_counts.items())),
         },
         "gates": {
+            "motion_gates_pass": all(motion_summary["gates"].values()),
             "video_decode_failure_rate": decode_failure_rate,
             "video_decode_failure_lt_0_001": decode_failure_rate < 0.001,
         },
