@@ -8,6 +8,7 @@ from __future__ import annotations
 import collections
 import json
 import math
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -581,6 +582,10 @@ def _process_video_episode(record: dict[str, Any], success_root: Path, config: F
     return {**record, "ranges": ranges, "f2_status": episode_status}
 
 
+def _process_video_block(block: list[dict[str, Any]], success_root: Path, config: F2Config) -> list[dict[str, Any]]:
+    return [_process_video_episode(record, success_root, config) for record in block]
+
+
 def build_f2_video(
     *,
     success_root: Path,
@@ -590,6 +595,7 @@ def build_f2_video(
     checkpoint_dir: Path | None = None,
     resume: bool = False,
     checkpoint_size: int = 100,
+    workers: int = 8,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     motion_path = f2_dir / "f2_motion_episodes.jsonl"
     motion_summary_path = f2_dir / "f2_motion_summary.json"
@@ -607,11 +613,14 @@ def build_f2_video(
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         if any(checkpoint_dir.glob("part-*.json")) and not resume:
             raise FileExistsError(f"F2 video checkpoints exist under {checkpoint_dir}; pass --resume")
+    if workers <= 0:
+        raise ValueError("workers must be positive")
 
-    output_records: list[dict[str, Any]] = []
-    for block_start in range(0, len(records), checkpoint_size):
-        block = records[block_start : block_start + checkpoint_size]
-        part_path = checkpoint_dir / f"part-{block_start // checkpoint_size:05d}.json" if checkpoint_dir else None
+    blocks = [records[start : start + checkpoint_size] for start in range(0, len(records), checkpoint_size)]
+    completed: dict[int, list[dict[str, Any]]] = {}
+    missing: list[tuple[int, list[dict[str, Any]], Path | None]] = []
+    for block_index, block in enumerate(blocks):
+        part_path = checkpoint_dir / f"part-{block_index:05d}.json" if checkpoint_dir else None
         if part_path is not None and part_path.is_file():
             payload = json.loads(part_path.read_text())
             expected_indices = [int(record["episode_index"]) for record in block]
@@ -620,20 +629,40 @@ def build_f2_video(
                 or payload.get("episode_indices") != expected_indices
             ):
                 raise ValueError(f"F2 video checkpoint fingerprint mismatch: {part_path}")
-            block_output = payload["records"]
+            completed[block_index] = payload["records"]
         else:
-            block_output = [_process_video_episode(record, success_root, config) for record in block]
-            if part_path is not None:
-                write_json(
-                    part_path,
-                    {
-                        "input_fingerprint": checkpoint_fingerprint,
-                        "episode_indices": [int(record["episode_index"]) for record in block],
-                        "records": block_output,
-                    },
-                )
-        output_records.extend(block_output)
-        print(f"F2 video progress: {len(output_records)}/{len(records)} episodes", flush=True)
+            missing.append((block_index, block, part_path))
+
+    def save_block(
+        block_index: int, block: list[dict[str, Any]], part_path: Path | None, block_output: list[dict[str, Any]]
+    ) -> None:
+        completed[block_index] = block_output
+        if part_path is not None:
+            write_json(
+                part_path,
+                {
+                    "input_fingerprint": checkpoint_fingerprint,
+                    "episode_indices": [int(record["episode_index"]) for record in block],
+                    "records": block_output,
+                },
+            )
+        processed = sum(len(value) for value in completed.values())
+        print(f"F2 video progress: {processed}/{len(records)} episodes", flush=True)
+
+    if workers == 1:
+        for block_index, block, part_path in missing:
+            save_block(block_index, block, part_path, _process_video_block(block, success_root, config))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_process_video_block, block, success_root, config): (block_index, block, part_path)
+                for block_index, block, part_path in missing
+            }
+            for future in as_completed(futures):
+                block_index, block, part_path = futures[future]
+                save_block(block_index, block, part_path, future.result())
+
+    output_records = [record for block_index in range(len(blocks)) for record in completed[block_index]]
 
     reason_counts: collections.Counter[str] = collections.Counter()
     status_counts: collections.Counter[str] = collections.Counter(record["f2_status"] for record in output_records)

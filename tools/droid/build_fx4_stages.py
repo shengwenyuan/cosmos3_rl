@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qc-root", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit-episodes", type=int)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     return parser
@@ -92,6 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit_episodes=args.limit_episodes,
             checkpoint_dir=None if args.dry_run else output_dir / ".f2_video_checkpoints",
             resume=args.resume,
+            workers=args.workers,
         )
         if not args.dry_run:
             write_f2_video(output_dir, summary, records)

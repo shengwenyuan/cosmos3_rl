@@ -117,6 +117,7 @@ def test_video_stage_resumes_from_atomic_parts(tmp_path, monkeypatch) -> None:
         config=F2Config(),
         checkpoint_dir=checkpoint_dir,
         checkpoint_size=1,
+        workers=1,
     )
     assert len(list(checkpoint_dir.glob("part-*.json"))) == 2
 
@@ -132,5 +133,6 @@ def test_video_stage_resumes_from_atomic_parts(tmp_path, monkeypatch) -> None:
         checkpoint_dir=checkpoint_dir,
         resume=True,
         checkpoint_size=1,
+        workers=1,
     )
     assert resumed == first
