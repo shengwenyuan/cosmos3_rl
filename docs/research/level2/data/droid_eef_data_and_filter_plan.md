@@ -52,14 +52,14 @@ Nano Policy 对齐过滤文件：
 - 任一标注命中以下内容即排除：液体/倾倒、擦拭清洁、布料与袋子、工具操作、电器、插接/拧紧，以及不属于堆叠/整理族的复杂多阶段任务。
 - 时长先保留 48–450 frames（3.2–30 秒）；边界后续由分布和人工复核调整。
 
-纳入堆叠/整理后，粗关键词探针得到 31,528 episodes、5,221,441 个 16-step windows，约为官方 filter 后窗口的 38.01%；其中保守的两票命中规则识别出 528 个堆叠/整理 episodes。这只是候选集规模，不能直接作为最终训练 manifest。
+纳入堆叠/整理后，粗关键词探针得到 31,528 episodes、4,645,374 个 32-step windows，约为官方 filter 后窗口的 36.85%；若做 chunk 16 备选，则有 5,221,441 个 windows。保守的两票命中规则识别出 528 个堆叠/整理 episodes。这只是候选集规模，不能直接作为最终训练 manifest。
 
 ### F2：EEF 与视频质量
 
 - 时间戳单调，三路视频存在且可解码；排除黑帧、长冻结和严重不同步。
 - EEF/夹爪均为 finite；处理 Euler wrap 后再计算相邻 SE(3) 增量。
 - 按训练集分布的 P99/P99.9 检查平移、旋转、速度和工作空间异常，不先拍脑袋写固定阈值。
-- 每个保留 range 至少形成一个完整 16-step window。
+- DROID Stage 1 主 manifest 要求每个保留 range 至少形成一个完整 32-step window；另记录 16-step 可用性，供 RH20T/UR12e 后续消融。
 - DROID 首轮不做 3 mm 等 EEF 增量重采样；保持 15 Hz，避免与官方 filter 和 Nano 数据节奏同时发生两项变化。
 
 ### F3：资源与分布控制
@@ -69,7 +69,7 @@ Nano Policy 对齐过滤文件：
 - 对高频任务设上限，对 push/pull 等少数族设最低配额。
 - 生成 `easy_v1_train.jsonl`、`easy_v1_val.jsonl` 和汇总表；split 必须在采样窗口前按 episode/场景分组完成。
 
-F1 约 522 万个 16-step windows；若每 episode 封顶 64，理论上限约 202 万，可显著减少一轮训练的重复样本与 I/O。
+F1 约 465 万个 32-step windows；若每 episode 封顶 64，理论上限约 202 万，可显著减少一轮训练的重复样本与 I/O。chunk 16 备选约有 522 万个 windows。
 
 ### F4：人工复核
 
