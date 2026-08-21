@@ -27,13 +27,13 @@ import numpy as np
 import torch
 from lerobot.datasets.video_utils import decode_video_frames
 
-from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Joint, build_action_spec
 from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
     ActionIterableShuffleDataset,
     ActionSFTDataset,
 )
 from cosmos_framework.data.generator.action.datasets.base_dataset import ActionBaseDataset
 from cosmos_framework.data.generator.action.datasets.canvas_utils import concat_three_view_canvas, zero_like_view
+from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Joint, build_action_spec
 from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
 
 PoseConvention = Literal["backward_framewise"]

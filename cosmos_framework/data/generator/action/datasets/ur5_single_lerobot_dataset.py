@@ -20,7 +20,6 @@ import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from torch.utils.data import Dataset
 
-from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Joint, build_action_spec
 from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
     ActionIterableShuffleDataset,
     ActionSFTDataset,
@@ -34,6 +33,7 @@ from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot impo
     ActionNormalization,
     BaseActionLeRobotDataset,
 )
+from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Joint, build_action_spec
 from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
 
 ConditionSource = Literal["action_t0", "observation_state_t0"]

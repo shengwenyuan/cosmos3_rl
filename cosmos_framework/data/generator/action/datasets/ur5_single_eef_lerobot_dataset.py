@@ -26,7 +26,6 @@ import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from torch.utils.data import Dataset
 
-from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Pos, Rot, build_action_spec
 from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
     ActionIterableShuffleDataset,
     ActionSFTDataset,
@@ -36,6 +35,7 @@ from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot impo
     ActionNormalization,
     BaseActionLeRobotDataset,
 )
+from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Pos, Rot, build_action_spec
 from cosmos_framework.data.generator.action.utils.pose_utils import build_abs_pose_from_components, pose_abs_to_rel
 from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
 

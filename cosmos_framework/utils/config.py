@@ -24,9 +24,9 @@ try:
 except ImportError:
     USE_MEGATRON = False
 
+from cosmos_framework.utils import distributed
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
-from cosmos_framework.utils import distributed
 from cosmos_framework.utils.misc import Color
 
 T = TypeVar("T")

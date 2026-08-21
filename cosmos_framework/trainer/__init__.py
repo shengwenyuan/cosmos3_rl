@@ -12,9 +12,13 @@ import torch
 import torch.distributed as dist
 import torch.utils.data
 
-from cosmos_framework.utils.flags import INTERNAL
 from cosmos_framework.utils.context_managers import distributed_init
-from cosmos_framework.utils.profiling import maybe_enable_memory_snapshot, maybe_enable_nsys_profiling, maybe_enable_profiling
+from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_nsys_profiling,
+    maybe_enable_profiling,
+)
 
 try:
     from megatron.core import parallel_state
@@ -24,12 +28,11 @@ except ImportError:
     USE_MEGATRON = False
 
 
-from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import callback, distributed, ema, log, misc
 from cosmos_framework.utils.checkpointer import Checkpointer
+from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.utils.misc import StragglerDetectorV2
-
 
 
 @dataclass
