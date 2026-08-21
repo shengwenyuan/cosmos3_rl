@@ -81,3 +81,12 @@ def test_group_split_is_deterministic_and_group_atomic() -> None:
         {"group_id": "lab/day2", "task_family": "pick_place_relocate"},
     ]
     assert assign_group_splits(records, F3Config()) == assign_group_splits(records, F3Config())
+
+
+def test_group_split_targets_episode_ratio_not_group_ratio() -> None:
+    records = [{"group_id": "lab/large", "task_family": "pick_place_relocate"} for _ in range(70)] + [
+        {"group_id": f"lab/small-{index}", "task_family": "pick_place_relocate"} for index in range(30)
+    ]
+    splits = assign_group_splits(records, F3Config(val_ratio=0.1))
+    validation_count = sum(splits[record["group_id"]] == "val" for record in records)
+    assert abs(validation_count / len(records) - 0.1) <= 0.01

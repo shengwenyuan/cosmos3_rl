@@ -122,28 +122,52 @@ def assign_group_splits(records: list[dict[str, Any]], config: F3Config) -> dict
     groups: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
     for record in records:
         groups[record["group_id"]].append(record)
-    split_by_group = {
-        group: (
-            "val"
-            if int.from_bytes(hashlib.sha256(f"{config.seed}:{group}".encode()).digest()[:8], "big") / 2**64
-            < config.val_ratio
-            else "train"
-        )
-        for group in groups
-    }
+    target_val_episodes = round(len(records) * config.val_ratio)
+    ranked_groups = sorted(
+        groups,
+        key=lambda group: (hashlib.sha256(f"{config.seed}:{group}".encode()).digest(), group),
+    )
+    selected_val_groups: set[str] = set()
+    selected_val_episodes = 0
+    for group in ranked_groups:
+        candidate_count = selected_val_episodes + len(groups[group])
+        if abs(candidate_count - target_val_episodes) < abs(selected_val_episodes - target_val_episodes):
+            selected_val_groups.add(group)
+            selected_val_episodes = candidate_count
+
     families = sorted({record["task_family"] for record in records})
     for family in families:
-        if any(split_by_group[record["group_id"]] == "val" and record["task_family"] == family for record in records):
-            continue
-        candidates = sorted(
+        family_groups = {
             group
             for group, group_records in groups.items()
-            if split_by_group[group] == "train" and any(record["task_family"] == family for record in group_records)
+            if any(record["task_family"] == family for record in group_records)
+        }
+        if len(family_groups) < 2:
+            raise ValueError(f"Cannot place family {family} in both train and validation groups")
+        if selected_val_groups & family_groups:
+            continue
+        candidates = sorted(
+            family_groups - selected_val_groups,
+            key=lambda group: (
+                abs(selected_val_episodes + len(groups[group]) - target_val_episodes),
+                hashlib.sha256(f"{config.seed}:{group}".encode()).digest(),
+                group,
+            ),
         )
         if not candidates:
             raise ValueError(f"Cannot create validation coverage for family {family}")
-        split_by_group[candidates[0]] = "val"
-    return split_by_group
+        selected_val_groups.add(candidates[0])
+        selected_val_episodes += len(groups[candidates[0]])
+
+    for family in families:
+        family_groups = {
+            group
+            for group, group_records in groups.items()
+            if any(record["task_family"] == family for record in group_records)
+        }
+        if family_groups <= selected_val_groups:
+            raise ValueError(f"Validation selection consumes every group for family {family}")
+    return {group: "val" if group in selected_val_groups else "train" for group in groups}
 
 
 def _stable_window_score(seed: int, task: str, episode_index: int, start: int) -> bytes:
