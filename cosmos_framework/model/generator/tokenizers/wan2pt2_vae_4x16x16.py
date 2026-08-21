@@ -696,6 +696,8 @@ def count_conv3d(model: nn.Module) -> int:
 
 
 class WanVAE_(nn.Module):
+    output_range: str = "[-1,1]"
+
     def __init__(
         self,
         dim=160,
@@ -741,10 +743,23 @@ class WanVAE_(nn.Module):
             self.temperal_upsample,
             dropout,
         )
+        self._compiled_decoder_forward: Callable[..., torch.Tensor] | None = None
 
         self._enc_conv_num = count_conv3d(self.encoder)
         self._dec_conv_num = count_conv3d(self.decoder)
         self._dec_cache: list[torch.Tensor | None] = self._new_dec_cache()
+
+    def enable_decoder_compile(self) -> None:
+        """Enable static compilation for non-priming decoder slices."""
+        self._compiled_decoder_forward = torch.compile(
+            self.decoder.forward,
+            fullgraph=True,
+            dynamic=False,
+        )
+        log.info(
+            "Enabled static torch.compile for steady-state Wan VAE decoder slices",
+            rank0_only=False,
+        )
 
     def _new_enc_cache(self) -> list:
         """Fresh per-layer cache for the encoder (one slot per CausalConv3d)."""
@@ -960,8 +975,13 @@ class WanVAE_(nn.Module):
         parts = []
         for i in range(x.shape[2]):
             first_chunk = (i == 0) and all(c is None for c in self._dec_cache)
+            decode_forward = (
+                self._compiled_decoder_forward
+                if self._compiled_decoder_forward is not None and not first_chunk
+                else self.decoder.forward
+            )
             parts.append(
-                self.decoder(
+                decode_forward(
                     x[:, :, i : i + 1],
                     feat_cache=self._dec_cache,
                     first_chunk=first_chunk,
@@ -976,6 +996,10 @@ class WanVAE_(nn.Module):
 
     def clear_decoder_cache(self) -> None:
         self._dec_cache = self._new_dec_cache()
+
+    def get_output_range(self) -> str:
+        """Return the pixel-output range produced by the native Wan decoder."""
+        return self.output_range
 
 
 def _video_vae(
@@ -1387,6 +1411,8 @@ class Wan2pt2VAEInterface(VideoTokenizerInterface):
         assert all(c % 4 == 0 for c in encode_chunk_frames.values()), "encode_chunk_frames must be a multiple of 4"
 
         self.chunk_duration = chunk_duration
+        self.bucket_name = bucket_name
+        self.object_store_credential_path_pretrained = object_store_credential_path_pretrained
 
         # Local-path support: skip the s3:// prefix when bucket_name is empty
         # so OSS users can point vae_path at an absolute local file.
@@ -1398,6 +1424,9 @@ class Wan2pt2VAEInterface(VideoTokenizerInterface):
             temporal_window=encode_chunk_frames,
             encode_exact_durations=encode_exact_durations,
         )
+        # ``None`` selects Wan's native decoder. An installed replacement still
+        # shares this Wan VAE instance for encoding model input video.
+        self._decoder_override: nn.Module | None = None
         self.encode_chunk_frames = encode_chunk_frames
         self.encode_exact_durations = encode_exact_durations
 
@@ -1419,15 +1448,51 @@ class Wan2pt2VAEInterface(VideoTokenizerInterface):
     def reset_dtype(self) -> None:
         pass
 
+    @property
+    def active_decoder(self) -> nn.Module:
+        """Return the decoder selected for model latents.
+
+        The default is the inner Wan decoder. ``set_decoder`` replaces only
+        this decode half; the Wan encoder remains available through ``encode``.
+        """
+        decoder_override = getattr(self, "_decoder_override", None)
+        if decoder_override is not None:
+            return decoder_override
+        return self.model.model
+
+    def get_output_range(self) -> str:
+        """Return the active decoder's pixel-output range contract."""
+        return self.active_decoder.get_output_range()
+
+    def set_decoder(self, decoder: nn.Module) -> None:
+        """Install a model-latent decoder while retaining the Wan encoder."""
+        if self._keep_decoder_cache:
+            raise RuntimeError("Cannot replace the decoder while a cached decode scope is active.")
+        clear_decoder_cache = getattr(decoder, "clear_decoder_cache", None)
+        if not callable(clear_decoder_cache):
+            raise ValueError("A Wan decoder override must provide clear_decoder_cache().")
+        get_output_range = getattr(decoder, "get_output_range", None)
+        output_range = get_output_range() if callable(get_output_range) else None
+        if output_range not in {"[-1,1]", "[0,1]"}:
+            raise ValueError("Decoder override must provide get_output_range() returning '[-1,1]' or '[0,1]'.")
+        self._decoder_override = decoder
+        clear_decoder_cache()
+
     @contextmanager
     def use_cached_decoder(self) -> Generator[None, None, None]:
-        """Enable decoder-cache reuse for sequential decode calls."""
-        self.model.model.clear_decoder_cache()
+        """Enable decoder-cache reuse for sequential decode calls.
+
+        A cached scope represents one generation and keeps one decoder active
+        for its complete cache lifecycle. ``set_decoder`` rejects replacements
+        until the scope exits.
+        """
+        decoder = self.active_decoder
+        decoder.clear_decoder_cache()
         self._keep_decoder_cache = True
         try:
             yield
         finally:
-            self.model.model.clear_decoder_cache()
+            decoder.clear_decoder_cache()
             self._keep_decoder_cache = False
 
     def encode(self, state: torch.Tensor) -> torch.Tensor:
@@ -1450,10 +1515,13 @@ class Wan2pt2VAEInterface(VideoTokenizerInterface):
         Returns:
             Tensor of shape ``[B, C, T, H, W]``.
         """
-        return self.model.decode(
-            latent,
-            clear_decoder_cache=not self._keep_decoder_cache,
-        )  # [B,3,T,H,W]
+        decoder_override = getattr(self, "_decoder_override", None)
+        if decoder_override is not None:
+            return decoder_override(
+                latent,
+                clear_decoder_cache=not self._keep_decoder_cache,
+            )  # [B,3,T,H,W]
+        return self.model.decode(latent, clear_decoder_cache=not self._keep_decoder_cache)  # [B,3,T,H,W]
 
     @torch.no_grad()
     def compile_encode(

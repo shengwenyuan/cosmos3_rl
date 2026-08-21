@@ -65,8 +65,8 @@ import torch
 
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
 from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
-from cosmos_framework.data.generator.action.domain_utils import get_domain_id
-from cosmos_framework.data.generator.action.transforms import build_sequence_plan_from_mode
+from cosmos_framework.data.generator.action.utils.domain_utils import get_domain_id
+from cosmos_framework.data.generator.action.utils.transforms import build_sequence_plan_from_mode
 from cosmos_framework.data.generator.sequence_packing import SequencePlan
 from cosmos_framework.inference.args import DEFAULT_CHECKPOINT, OmniSampleOverrides
 from cosmos_framework.inference.inference import get_sample_data

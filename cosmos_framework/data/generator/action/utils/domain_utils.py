@@ -23,8 +23,11 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
     "xdof_yam": 16,
     "molmoact2_yam": 16,  # MolmoAct2 uses the same YAM 20D FK action contract
     "abc_yam": 16,  # ABC uses the same YAM 20D FK action contract
+    "robotwin": 17,  # RoboTwin dual-arm ALOHA (14D absolute joint_pos)
     "fractal": 20,
     "drawanything": 21,
+    "behavior1k_lerobot": 22,  # BEHAVIOR-1K R1Pro mobile bimanual (23D joint action)
+    "maniparena": 23,  # ManipArena x2robot/ex001_6r dual-arm; own 20D EE-direct action projection
     # cosmos3_rl UR5 extensions. Reserve the high end of the current 32-slot table.
     "berkeley-ur5-eef": 29,
     "ur5-single-eef": 29,
@@ -51,8 +54,11 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
     "xdof_yam": 20,
     "molmoact2_yam": 20,
     "abc_yam": 20,
+    "maniparena": 20,  # dual-arm EE: [pos(3)+rot6d(6)+gripper(1)] x 2
+    "robotwin": 14,  # dual-arm ALOHA: [L 6 joints + 1 gripper, R 6 joints + 1 gripper]
     "fractal": 10,
     "drawanything": 3,
+    "behavior1k_lerobot": 23,  # base(3) trunk(4) arms(14) grippers(2)
     # NOTE: ``libero`` (7/10/13 depending on ``rotation_space``) and ``hand_pose``
     # (variable with ``keypoint_option`` and ``rotation_format``) are absent
     # because their raw width is set per-dataset at construction time. Inference

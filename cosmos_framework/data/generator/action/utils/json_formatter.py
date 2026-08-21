@@ -7,7 +7,7 @@ import math
 
 import torch
 
-from cosmos_framework.data.generator.action.viewpoint_utils import DEFAULT_VIEWPOINT_TEMPLATES
+from cosmos_framework.data.generator.action.utils.viewpoint_utils import DEFAULT_VIEWPOINT_TEMPLATES
 from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.utils import log
 
@@ -41,10 +41,10 @@ class ActionPromptJsonFormatter:
 
     A dataset may additionally supply ``data_dict["relabel_prompt"]`` -- the
     per-keyframe relabeling active at this chunk, as ``task_state`` and/or
-    ``situation`` (see :mod:`~.relabel_annotations`).  Its keys are merged into
-    the action entry *after* the existing ones, so prompts built without
-    relabeling are unchanged.  Like idle-frame metadata it is suppressed for
-    ``"inverse_dynamics"``.
+    ``situation`` (see the action-level ``relabel_annotations`` module). Its
+    keys are merged into the action entry *after* the existing ones, so prompts
+    built without relabeling are unchanged. Like idle-frame metadata it is
+    suppressed for ``"inverse_dynamics"``.
     """
 
     def __init__(
@@ -62,6 +62,8 @@ class ActionPromptJsonFormatter:
         append_duration_fps_timestamps: bool = True,
         append_resolution_info: bool = True,
         append_idle_frames: bool = True,
+        float_seconds: bool = False,
+        video_num_frames_key: str = "video_num_frames",
     ) -> None:
         self.caption_key: str = caption_key
         self.viewpoint_key: str = viewpoint_key
@@ -75,6 +77,12 @@ class ActionPromptJsonFormatter:
         self.append_duration_fps_timestamps = append_duration_fps_timestamps
         self.append_resolution_info = append_resolution_info
         self.append_idle_frames = append_idle_frames
+        # When True, ``duration`` and action ``time`` are sub-second-precise
+        # floats (e.g. "0.57s", "0.00-0.57s") instead of truncated/rounded whole
+        # seconds. Useful for short high-fps clips (e.g. 16-frame chunks at 30 fps
+        # = 0.53 s) where the integer format collapses to "0s".
+        self.float_seconds: bool = float_seconds
+        self.video_num_frames_key: str = video_num_frames_key
         self.viewpoint_templates: dict[str, str] = (
             viewpoint_templates if viewpoint_templates is not None else DEFAULT_VIEWPOINT_TEMPLATES
         )
@@ -106,9 +114,13 @@ class ActionPromptJsonFormatter:
                     f"ActionPromptJsonFormatter: expected '{self.video_key}' to be a video tensor with shape "
                     f"(C, T, H, W), got {type(video).__name__}"
                 )
-            duration_seconds = video.shape[1] / fps
-            action_time = f"0:00-{self._format_time_mss(self._round_time_seconds(duration_seconds))}"
-            duration_fields["duration"] = f"{self._truncate_seconds(duration_seconds)}s"
+            duration_seconds = int(data_dict.get(self.video_num_frames_key, video.shape[1])) / fps
+            if self.float_seconds:
+                action_time = f"0.00-{duration_seconds:.2f}s"
+                duration_fields["duration"] = f"{duration_seconds:.2f}s"
+            else:
+                action_time = f"0:00-{self._format_time_mss(self._round_time_seconds(duration_seconds))}"
+                duration_fields["duration"] = f"{self._truncate_seconds(duration_seconds)}s"
             duration_fields["fps"] = float(fps)
 
         action_entry: dict[str, object] = {}

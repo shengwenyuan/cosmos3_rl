@@ -525,6 +525,33 @@ def pose_rel_to_abs(
 
 
 # -----------------------------------------------------------------------------
+# Absolute 9D pose vectors: [pos(3), rot6d(6)]
+# -----------------------------------------------------------------------------
+
+
+def pose_abs_to_abs9d(poses_abs: np.ndarray) -> np.ndarray:
+    """Convert absolute poses to absolute ``[pos(3), rot6d(6)]`` vectors.
+
+    Both halves of the name mean different things: the input is an absolute
+    ``(T, 4, 4)`` trajectory, and the output keeps absolute values rather than
+    per-step deltas.
+
+    The leading frame is dropped so the output aligns step-for-step with
+    ``pose_abs_to_rel(..., rotation_format="rot6d")``, which spends one frame
+    forming its first delta.
+
+    Args:
+        poses_abs: Absolute poses with shape ``(T, 4, 4)``.
+
+    Returns:
+        Array of shape ``(T - 1, 9)`` and dtype ``float32``.
+    """
+    pos = poses_abs[1:, :3, 3].astype(np.float32)  # (T-1, 3)
+    rot6d = convert_rotation(poses_abs[1:, :3, :3], input_format="matrix", output_format="rot6d")  # (T-1, 6)
+    return np.concatenate([pos, rot6d], axis=-1)
+
+
+# -----------------------------------------------------------------------------
 # Idle-frame detection
 # -----------------------------------------------------------------------------
 
@@ -685,7 +712,7 @@ def compute_idle_frames(
 
     # Import locally to avoid a circular import at module load time
     # (action_spec.py imports RotationConvention from this file).
-    from cosmos_framework.data.generator.action.action_spec import DimType
+    from cosmos_framework.data.generator.action.utils.action_spec import DimType
 
     pos_idx = [i for i, t in enumerate(spec.types) if t == DimType.POS]
     rot_idx = [i for i, t in enumerate(spec.types) if t == DimType.ROT]
@@ -727,3 +754,41 @@ def compute_idle_frames(
         idle = _consecutive_streaks(idle, min_streak)
 
     return int(idle.sum())
+
+
+def compute_framewise_idle_frames(
+    action_raw: torch.Tensor | np.ndarray,
+    spec: "ActionSpec",  # noqa: F821 — forward ref, real import is in action_spec.py
+    *,
+    fps: float,
+    pose_convention: PoseConvention,
+    eps_t_per_sec: float = 5e-3,
+    eps_r_per_sec: float = math.radians(1.5),
+    eps_g: float = 1e-2,
+    joint_threshold_per_sec: float = 5e-3,
+    min_streak: int = 3,
+    eps_t: float | None = None,
+    eps_r: float | None = None,
+    joint_threshold: float | None = None,
+) -> torch.Tensor | None:  # [] or None
+    """Apply the shared framewise idle policy and return a trainer scalar.
+
+    Velocity thresholds are converted from per-second to per-frame units using
+    ``fps`` unless an explicit per-frame override is provided. Anchored and
+    absolute pose conventions do not have framewise idle semantics.
+    """
+    if pose_convention != "backward_framewise":
+        return None
+    if fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps}.")
+
+    idle_frame_count = compute_idle_frames(
+        action_raw,
+        spec,
+        eps_t=eps_t if eps_t is not None else eps_t_per_sec / fps,
+        eps_r=eps_r if eps_r is not None else eps_r_per_sec / fps,
+        eps_g=eps_g,
+        joint_threshold=(joint_threshold if joint_threshold is not None else joint_threshold_per_sec / fps),
+        min_streak=min_streak,
+    )
+    return torch.tensor(idle_frame_count, dtype=torch.long)  # []

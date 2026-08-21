@@ -11,7 +11,8 @@ Topology
   ``world_size`` so the overlay grid is well-formed, but the same rank may
   appear in both a dp group AND a cp/cfgp group.
 
-Three meshes are built (any subset, depending on which axes are >1):
+Three meshes are built (``dp_mesh`` always for training, the overlays depending
+on which of their axes are >1):
 
 ================  ===========================================================
 Mesh              Shape / dims
@@ -20,6 +21,10 @@ Mesh              Shape / dims
 ``cp_mesh``       1-D, size ``cp``    (context parallelism)
 ``cfgp_mesh``     1-D, size ``cfgp``  (CFG parallelism, inference-only)
 ================  ===========================================================
+
+``dp_mesh`` keeps its singleton axes, so it stays 2-D even at ``dp_replicate == 1``.
+``fully_shard`` call sites must therefore go through :func:`fsdp_mesh` rather than reading
+``dp_mesh`` directly — see that function for what a 2-D mesh costs a pure-FSDP run.
 
 Use cases
 ---------
@@ -66,8 +71,10 @@ class ParallelDims:
                                used for only VFM to parallelize the conditional and
                                unconditional guidance.
         enable_inference_mode: Selects inference-time semantics — ``cfgp`` may
-                               be >1 and ``dp_enabled`` ignores ``dp_replicate``
-                               (matches the legacy VFM inference path).
+                               be >1 and ``dp_enabled`` becomes degree-based
+                               (``dp_shard > 1``, ignoring ``dp_replicate``) rather than
+                               training's unconditional True (matches the legacy VFM
+                               inference path).
     """
 
     world_size: int
@@ -223,9 +230,18 @@ class ParallelDims:
 
     @property
     def dp_enabled(self) -> bool:
+        """Whether a dp mesh is built and the network is wrapped in FSDP2 units.
+
+        Training is unconditional, degree 1 (a single-rank ``(1, 1)`` mesh) included: the
+        wrap is also what installs the ``MixedPrecisionPolicy``, so skipping it where there
+        is no cross-rank sharding to gain would leave nothing to cast the master parameters
+        down to the compute dtype, silently making the master dtype the compute dtype.
+        Inference installs no policy, so it keeps the degree-based test rather than pay for
+        DTensor parameters it cannot use, and ignores ``dp_replicate``.
+        """
         if self.enable_inference_mode:
             return self.dp_shard > 1
-        return self.dp_replicate > 1 or self.dp_shard > 1
+        return True
 
     @property
     def dp_shard_enabled(self) -> bool:
@@ -260,3 +276,28 @@ class ParallelDims:
     @property
     def cfgp_size(self) -> int:
         return self._meshes["cfgp"].size() if self.cfgp_enabled else 1
+
+
+def fsdp_mesh(parallel_dims: ParallelDims) -> "DeviceMesh | None":
+    """Return the mesh to hand ``fully_shard``: 2-D for HSDP, 1-D for pure FSDP.
+
+    ``fully_shard`` picks its reduction strategy from ``mesh.ndim`` ALONE, never from the
+    dim sizes — a 2-D mesh always becomes ``HSDPMeshInfo``, and FSDP2's ``_is_hsdp`` is a
+    plain ``isinstance`` check on it. Since :meth:`ParallelDims._build_mesh` keeps singleton
+    axes, :attr:`ParallelDims.dp_mesh` is 2-D even when ``dp_replicate == 1``, so handing it
+    over unconditionally puts a pure-FSDP run on the HSDP path: every gradient reduction then
+    pays an ``all_reduce`` over a ONE-RANK group plus the ``all_reduce_stream.wait_stream``
+    that guards it, per FSDP module per step. The gradients are still correct — a one-rank
+    all-reduce is the identity — so the only symptom is unattributed per-step latency, which
+    is why this is easy to introduce and hard to notice.
+
+    Use this instead of reaching for a mesh attribute directly at a ``fully_shard`` call site.
+
+    Returns:
+        ``dp_shard_mesh`` (1-D) when there is no replicate axis to reduce over, else
+        ``dp_mesh`` (2-D). ``None`` when dp is disabled entirely, which callers are expected
+        to have already excluded.
+    """
+    if parallel_dims.dp_replicate_enabled:
+        return parallel_dims.dp_mesh
+    return parallel_dims.dp_shard_mesh

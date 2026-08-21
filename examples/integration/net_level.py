@@ -107,8 +107,8 @@ import torch.nn.functional as F
 
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
 from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
-from cosmos_framework.data.generator.action.domain_utils import get_domain_id
-from cosmos_framework.data.generator.action.transforms import build_sequence_plan_from_mode
+from cosmos_framework.data.generator.action.utils.domain_utils import get_domain_id
+from cosmos_framework.data.generator.action.utils.transforms import build_sequence_plan_from_mode
 from cosmos_framework.data.generator.sequence_packing import SequencePlan, build_sequence_plans_from_data_batch
 from cosmos_framework.inference.args import DEFAULT_CHECKPOINT
 from cosmos_framework.inference.model import Cosmos3OmniConfig, Cosmos3OmniModel

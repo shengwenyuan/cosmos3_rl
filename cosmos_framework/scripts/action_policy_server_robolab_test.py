@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 import torch
 
-from cosmos_framework.data.generator.action.action_processing import ActionProcessingRecord
 from cosmos_framework.data.generator.action.policy_schema import ActionPolicyManifest, save_action_policy_manifest
+from cosmos_framework.data.generator.action.utils.action_processing import ActionProcessingRecord
 
 with patch("cosmos_framework.inference.common.init._init_script", lambda **kwargs: None):
     for module_name in (
@@ -111,6 +111,7 @@ def _service_config(manifest: ActionPolicyManifest) -> robolab_server.RobolabPol
         seed=0,
         deterministic_seed=True,
         guidance=3.0,
+        guidance_interval=None,
         num_steps=4,
         shift=5.0,
     )
@@ -252,10 +253,17 @@ def test_server_args_only_default_runtime_not_policy_semantics() -> None:
     assert args.dataset_source is None
     assert args.seed == 0
     assert args.guidance == 3.0
+    assert args.guidance_interval is None
     assert args.num_steps == 4
     assert args.shift == 5.0
     assert not hasattr(args, "robot")
     assert not hasattr(args, "gripper_invert")
+
+
+def test_server_args_accept_guidance_interval() -> None:
+    args = robolab_server.RobolabServerArgs(guidance_interval=(960.0, 1001.0))
+
+    assert args.guidance_interval == (960.0, 1001.0)
 
 
 def test_policy_contract_is_manifest_driven_and_allows_arbitrary_robot_name() -> None:

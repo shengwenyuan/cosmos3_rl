@@ -121,8 +121,8 @@ import torch
 
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
 from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
-from cosmos_framework.data.generator.action.domain_utils import get_domain_id
-from cosmos_framework.data.generator.action.transforms import build_sequence_plan_from_mode
+from cosmos_framework.data.generator.action.utils.domain_utils import get_domain_id
+from cosmos_framework.data.generator.action.utils.transforms import build_sequence_plan_from_mode
 from cosmos_framework.data.generator.sequence_packing import SequencePlan
 from cosmos_framework.inference.args import DEFAULT_CHECKPOINT
 from cosmos_framework.inference.model import Cosmos3OmniConfig, Cosmos3OmniModel
@@ -277,7 +277,7 @@ def make_action_fdm_batch(model, *, caption: str, num_video_frames: int = 5,
     See `cosmos_framework/inference/action.py: build_action_batch` for the canonical impl.
 
     `domain_name` selects the cross-embodiment routing; see
-    `cosmos_framework/data/generator/action/domain_utils.py` for the full list of supported
+    `cosmos_framework/data/generator/action/utils/domain_utils.py` for the full list of supported
     embodiments.
     """
     # First frame is the conditioning anchor; remaining frames are predicted.

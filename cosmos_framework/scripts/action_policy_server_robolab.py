@@ -30,6 +30,7 @@ from cosmos_framework.inference.common.init import init_script
 init_script()
 
 import json
+import os
 import socket
 import threading
 import time
@@ -43,22 +44,22 @@ import torch
 import torch.nn.functional as F
 import tyro
 
-from cosmos_framework.data.generator.action.domain_utils import get_domain_id
 from cosmos_framework.data.generator.action.policy_schema import (
     ActionPolicyManifest,
     DatasetSourceDescription,
     find_action_policy_manifest,
     load_action_policy_manifest,
 )
-from cosmos_framework.data.generator.action.pose_utils import (
+from cosmos_framework.data.generator.action.utils.domain_utils import get_domain_id
+from cosmos_framework.data.generator.action.utils.pose_utils import (
     build_abs_pose_from_components,
     convert_rotation,
     pose_abs_to_rel,
     pose_rel_to_abs,
 )
-from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
+from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
 from cosmos_framework.data.generator.joint_dataloader import IterativeJointDataLoader
-from cosmos_framework.inference.args import OmniSetupArgs, OmniSetupOverrides
+from cosmos_framework.inference.args import GuidanceInterval, OmniSetupArgs, OmniSetupOverrides
 from cosmos_framework.inference.common.args import tyro_cli
 from cosmos_framework.inference.common.init import init_output_dir
 from cosmos_framework.inference.inference import OmniInference
@@ -304,6 +305,7 @@ class RobolabPolicyConfig:
     seed: int
     deterministic_seed: bool
     guidance: float
+    guidance_interval: GuidanceInterval | None
     num_steps: int
     shift: float
 
@@ -390,6 +392,8 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Use the same seed for every request. If false, advance a NumPy RNG seeded by --seed."""
     guidance: float = 3.0
     """Guidance scale for denoising."""
+    guidance_interval: GuidanceInterval | None = None
+    """Optional inclusive timestep interval [low, high] in which to apply classifier-free guidance."""
     num_steps: int = 4
     """Number of denoising steps."""
     shift: float = 5.0
@@ -437,6 +441,7 @@ class RobolabPolicyService:
             seed=int(args.seed),
             deterministic_seed=bool(args.deterministic_seed),
             guidance=float(args.guidance),
+            guidance_interval=args.guidance_interval,
             num_steps=int(args.num_steps),
             shift=float(args.shift),
         )
@@ -451,7 +456,8 @@ class RobolabPolicyService:
             f"action_dim={self.cfg.action_dim} wire_dim={manifest.wire_action_dim} "
             f"chunk={self.cfg.action_chunk_size} history={self.cfg.history_length} use_state={self.cfg.use_state} "
             f"image={self.cfg.image_height}x{self.cfg.image_width} fps={self.cfg.conditioning_fps} "
-            f"guidance={self.cfg.guidance} num_steps={self.cfg.num_steps} shift={self.cfg.shift} "
+            f"guidance={self.cfg.guidance} guidance_interval={self.cfg.guidance_interval} "
+            f"num_steps={self.cfg.num_steps} shift={self.cfg.shift} "
             f"seed={self.cfg.seed} deterministic_seed={self.cfg.deterministic_seed} "
             f"model_gripper={manifest.model_action.gripper.semantics} "
             f"wire_gripper={manifest.wire_action.gripper.semantics}"
@@ -608,6 +614,9 @@ class RobolabPolicyService:
                 samples = self.model.generate_samples_from_batch(
                     data_batch,
                     guidance=self.cfg.guidance,
+                    guidance_interval=(
+                        list(self.cfg.guidance_interval) if self.cfg.guidance_interval is not None else None
+                    ),
                     seed=[seed],
                     num_steps=self.cfg.num_steps,
                     shift=self.cfg.shift,
@@ -654,11 +663,14 @@ class RobolabPolicyService:
             video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]
             video = ((video[0].clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8).permute(1, 2, 3, 0)  # [T,H,W,3]
             outputs["video"] = video.detach().cpu().numpy()
+        infer_elapsed = time.perf_counter() - infer_start
         log.info(
             f"[robolab-policy-server] inference_chunk_end seed={seed} "
-            f"elapsed_s={time.perf_counter() - infer_start:.3f} generate_s={generate_elapsed:.3f} "
+            f"elapsed_s={infer_elapsed:.3f} generate_s={generate_elapsed:.3f} "
             f"action_shape={tuple(action_np.shape)}"
         )
+        if os.environ.get("EVAL_VERBOSE"):
+            print(f"infer_ms: {infer_elapsed * 1000.0:.1f}")
         return outputs
 
 
