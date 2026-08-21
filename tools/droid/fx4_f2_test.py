@@ -76,7 +76,23 @@ def test_absolute_motion_gate_rejects_only_explicit_limits() -> None:
         "max_smoothing_translation_m": 0.001,
         "max_smoothing_rotation_deg": 1.0,
     }
-    assert motion_gate_reasons(metrics, F2Config()) == ["step_translation_above_absolute_limit"]
+    assert motion_gate_reasons(metrics, F2Config()) == ["step_translation_above_limit"]
+
+
+def test_data_driven_rejection_limits_override_absolute_defaults() -> None:
+    metrics = {
+        "max_step_translation_m": 0.04,
+        "max_step_rotation_deg": 4.0,
+        "max_smoothing_translation_m": 0.01,
+        "max_smoothing_rotation_deg": 1.0,
+    }
+    limits = {
+        "max_step_translation_m": 0.03,
+        "max_step_rotation_deg": 5.0,
+        "max_smoothing_translation_m": 0.02,
+        "max_smoothing_rotation_deg": 2.0,
+    }
+    assert motion_gate_reasons(metrics, F2Config(), limits) == ["step_translation_above_limit"]
 
 
 def test_sample_freeze_ratio_uses_adjacent_thumbnail_mad() -> None:

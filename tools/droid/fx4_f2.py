@@ -39,7 +39,7 @@ class F2Config:
     smoothing_window: int = 5
     max_step_translation_m: float = 0.10
     max_step_rotation_deg: float = 45.0
-    max_smoothing_translation_m: float = 0.02
+    max_smoothing_translation_m: float = 0.05
     max_smoothing_rotation_deg: float = 10.0
     black_mean_max: float = 5.0
     black_std_max: float = 2.0
@@ -175,18 +175,22 @@ def motion_metrics(trajectory: Trajectory, start: int, stop: int, fps: float) ->
     }
 
 
-def motion_gate_reasons(metrics: dict[str, float], config: F2Config) -> list[str]:
+def motion_gate_reasons(
+    metrics: dict[str, float], config: F2Config, rejection_limits: dict[str, float] | None = None
+) -> list[str]:
+    limits = rejection_limits or {
+        "max_step_translation_m": config.max_step_translation_m,
+        "max_step_rotation_deg": config.max_step_rotation_deg,
+        "max_smoothing_translation_m": config.max_smoothing_translation_m,
+        "max_smoothing_rotation_deg": config.max_smoothing_rotation_deg,
+    }
     checks = (
-        ("step_translation_above_absolute_limit", "max_step_translation_m", config.max_step_translation_m),
-        ("step_rotation_above_absolute_limit", "max_step_rotation_deg", config.max_step_rotation_deg),
-        (
-            "smoothing_translation_above_limit",
-            "max_smoothing_translation_m",
-            config.max_smoothing_translation_m,
-        ),
-        ("smoothing_rotation_above_limit", "max_smoothing_rotation_deg", config.max_smoothing_rotation_deg),
+        ("step_translation_above_limit", "max_step_translation_m"),
+        ("step_rotation_above_limit", "max_step_rotation_deg"),
+        ("smoothing_translation_above_limit", "max_smoothing_translation_m"),
+        ("smoothing_rotation_above_limit", "max_smoothing_rotation_deg"),
     )
-    return [reason for reason, key, limit in checks if metrics[key] > limit]
+    return [reason for reason, key in checks if metrics[key] > limits[key]]
 
 
 def distribution_summary(values: np.ndarray) -> dict[str, float]:
@@ -278,7 +282,8 @@ def build_f2_motion(
     metadata = load_episode_metadata(success_root)
     trajectories = load_accepted_trajectories(success_root, accepted, metadata, config)
 
-    distributions: dict[str, list[np.ndarray]] = collections.defaultdict(list)
+    frame_distributions: dict[str, list[np.ndarray]] = collections.defaultdict(list)
+    range_max_distributions: dict[str, list[float]] = collections.defaultdict(list)
     for episode_index, record in accepted.items():
         trajectory = trajectories[episode_index]
         for range_record in record["ranges"]:
@@ -287,24 +292,45 @@ def build_f2_motion(
             start, stop = range_frame_bounds(range_record, len(trajectory.timestamp), config.chunk_length)
             raw_xyz = trajectory.raw_xyz[start:stop]
             raw_rotation = trajectory.raw_rotation[start:stop]
-            distributions["step_translation_m"].append(np.linalg.norm(np.diff(raw_xyz, axis=0), axis=1))
-            distributions["step_rotation_deg"].append(rotation_step_degrees(raw_rotation))
-            distributions["smoothing_translation_m"].append(
-                np.linalg.norm(raw_xyz - trajectory.smooth_xyz[start:stop], axis=1)
-            )
-            distributions["smoothing_rotation_deg"].append(
-                np.degrees((raw_rotation.inv() * trajectory.smooth_rotation[start:stop]).magnitude())
-            )
+            frame_values = {
+                "step_translation_m": np.linalg.norm(np.diff(raw_xyz, axis=0), axis=1),
+                "step_rotation_deg": rotation_step_degrees(raw_rotation),
+                "smoothing_translation_m": np.linalg.norm(raw_xyz - trajectory.smooth_xyz[start:stop], axis=1),
+                "smoothing_rotation_deg": np.degrees(
+                    (raw_rotation.inv() * trajectory.smooth_rotation[start:stop]).magnitude()
+                ),
+            }
+            for name, values in frame_values.items():
+                frame_distributions[name].append(values)
+                range_max_distributions[name].append(float(values.max(initial=0.0)))
+
+    observed_frame = {
+        name: distribution_summary(np.concatenate(values) if values else np.empty(0))
+        for name, values in sorted(frame_distributions.items())
+    }
+    observed_range_max = {
+        name: distribution_summary(np.asarray(values, dtype=np.float64))
+        for name, values in sorted(range_max_distributions.items())
+    }
+    rejection_limits = {
+        "max_step_translation_m": min(observed_range_max["step_translation_m"]["p999"], config.max_step_translation_m),
+        "max_step_rotation_deg": min(observed_range_max["step_rotation_deg"]["p999"], config.max_step_rotation_deg),
+        "max_smoothing_translation_m": min(
+            observed_range_max["smoothing_translation_m"]["p999"], config.max_smoothing_translation_m
+        ),
+        "max_smoothing_rotation_deg": min(
+            observed_range_max["smoothing_rotation_deg"]["p999"], config.max_smoothing_rotation_deg
+        ),
+    }
 
     thresholds = {
-        "version": "fx4_f2_thresholds_v1",
+        "version": "fx4_f2_thresholds_v2",
         "pose_smoothing_rule": SMOOTHING_RULE,
         "config": config.__dict__,
-        "observed": {
-            name: distribution_summary(np.concatenate(values) if values else np.empty(0))
-            for name, values in sorted(distributions.items())
-        },
-        "policy": "P99/P99.9 are audit thresholds; only explicit absolute limits reject in F2 v1.",
+        "observed_frame": observed_frame,
+        "observed_range_max": observed_range_max,
+        "rejection_limits": rejection_limits,
+        "policy": "Reject above min(range-max P99.9, absolute safety limit); retain P99 for audit.",
     }
 
     records: list[dict[str, Any]] = []
@@ -321,7 +347,7 @@ def build_f2_motion(
                 continue
             start, stop = range_frame_bounds(range_record, len(trajectory.timestamp), config.chunk_length)
             metrics = motion_metrics(trajectory, start, stop, config.fps)
-            reasons = [*episode_reasons, *motion_gate_reasons(metrics, config)]
+            reasons = [*episode_reasons, *motion_gate_reasons(metrics, config, rejection_limits)]
             status = "accepted" if not reasons else "rejected"
             if status == "accepted":
                 kept_ranges += 1
