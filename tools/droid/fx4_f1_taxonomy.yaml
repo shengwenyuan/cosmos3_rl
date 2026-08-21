@@ -1,0 +1,64 @@
+version: fx4_f1_taxonomy_v1
+annotation_separator: "|"
+vote_threshold: 2
+episode_length_frames:
+  min: 48
+  max: 450
+
+family_precedence:
+  - stack_arrange
+  - open_close
+  - push_pull_slide
+  - pick_place_relocate
+
+positive_families:
+  stack_arrange:
+    - '\b(stack|stacked|stacking|pile|piled|piling)\b'
+    - '\b(arrange|arranged|arranging|organize|organized|organizing|organise|organised|organising)\b'
+    - '\b(sort|sorted|sorting|tidy|tidied|tidying|rearrange|rearranged|rearranging)\b'
+    - '\b(line up|lined up|lining up|align|aligned|aligning|group|grouped|grouping)\b'
+    - '\b(in a row|straight line|side by side)\b'
+  open_close:
+    - '\b(open|opens|opened|opening|close|closes|closed|closing|shut|shuts|shutting)\b'
+  push_pull_slide:
+    - '\b(push|pushes|pushed|pushing|pull|pulls|pulled|pulling)\b'
+    - '\b(slide|slides|slid|sliding|drag|drags|dragged|dragging)\b'
+  pick_place_relocate:
+    - '\b(pick|picks|picked|picking|place|places|placed|placing|put|puts|putting)\b'
+    - '\b(move|moves|moved|moving|shift|shifts|shifted|shifting|relocate|relocates|relocated|relocating)\b'
+    - '\b(take|takes|took|taking|remove|removes|removed|removing|transfer|transfers|transferred|transferring)\b'
+    - '\b(lift|lifts|lifted|lifting)\b'
+
+hard_exclusions:
+  no_action:
+    - '\bno action\b'
+  liquid_pouring:
+    - '\b(pour|pours|poured|pouring|liquid|water|juice|contents?)\b'
+  wipe_clean:
+    - '\b(wipe|wipes|wiped|wiping|clean|cleans|cleaned|cleaning|scrub|scrubs|scrubbed|scrubbing)\b'
+    - '\b(sweep|sweeps|swept|sweeping|sponge|sponges|dust|dusts|dusted|dusting|mop|mops|mopped|mopping)\b'
+  cloth_bag_fold:
+    - '\b(cloth|clothe|clothes|clothing|towel|towels|rag|rags|napkin|napkins|sock|socks|fabric|fabrics)\b'
+    - '\b(shirt|shirts|jersey|jerseys|vest|vests|jacket|jackets|pants|trousers)\b'
+    - '\b(bag|bags|backpack|backpacks|fold|folds|folded|folding|laundry|tissue|tissues)\b'
+    - '\b(rope|ropes|string|strings|cord|cords|cable|cables|shoelace|shoelaces|zipper|zippers|foil)\b'
+  cutting_tool:
+    - '\b(cuts|cutting|sliced|slicing|peeled|peeling)\b'
+    - '\b(cut|slice|peel)\s+(the|a|an|this|that|it|into|through)\b'
+    - '\b(saws|sawed|sawing|drills|drilled|drilling|hammers|hammered|hammering)\b'
+    - '\b(saw|drill|hammer)\s+(the|a|an|this|that|it|into|through)\b'
+    - '\b(use|uses|used|using|operate|operates|operated|operating)\b[^|]{0,30}\b(knife|knives|scissors|screw\s*driver|hammer|drill|saw)\b'
+  appliance:
+    - '\b(oven|microwave|toaster|dishwasher|blender|kettle|refrigerator|fridge|stove|appliance)\b'
+    - '\b(coffee maker|coffee machine|coffeemaker)\b'
+  insertion_fastener:
+    - '\b(plug|plugs|plugged|plugging|unplug|unplugs|unplugged|unplugging|socket|sockets)\b'
+    - '\b(insert|inserts|inserted|inserting|screws|screwed|screwing|unscrew|unscrews|unscrewed|unscrewing)\b'
+    - '\bscrew\s+(the|a|an|this|that|it)\b'
+    - '\b(tighten|tightens|tightened|tightening|loosen|loosens|loosened|loosening)\b[^|]{0,30}\b(screw|bolt|nut|fastener|cap|lid)\b'
+    - '\b(attach|attaches|attached|attaching|connect(?!\s+four\b)|connects|connected|connecting|disconnect|disconnects|disconnected|disconnecting)\b'
+    - '\b(connect four|pegboard|peg board)\b'
+    - '\b(ring|disc|disk)\b[^|]{0,30}\b(rack|peg|stand|board)\b'
+  control_operation:
+    - '\b(press|push|flip)\w*\s+(the\s+)?(button|switch)\b'
+    - '\bturn\w*\s+(the\s+)?[^|]{0,30}\s+(on|off)\b'

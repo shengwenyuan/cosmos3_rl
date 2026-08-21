@@ -24,6 +24,8 @@ from typing import Any, Sequence
 
 import pyarrow.parquet as pq
 
+from tools.droid.fx4_f1 import build_f1
+
 DROID_GCS_PREFIX = "gs://xembodiment_data/r2d2/r2d2-data-full/"
 DEFAULT_CHUNK_LENGTH = 32
 DEFAULT_EXPECTED_MATCHED_EPISODES = 56_804
@@ -358,9 +360,13 @@ def _validate_complete_f0_output(output_dir: Path, input_fingerprint: str) -> di
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("f0",), default="f0")
+    parser.add_argument("--stage", choices=("f0", "f1"), default="f0")
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--filter-path", type=Path, required=True)
+    parser.add_argument("--filter-path", type=Path)
+    parser.add_argument("--f0-dir", type=Path)
+    parser.add_argument("--taxonomy-path", type=Path, default=Path(__file__).with_name("fx4_f1_taxonomy.yaml"))
+    parser.add_argument("--limit-episodes", type=int)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--chunk-length", type=int, default=DEFAULT_CHUNK_LENGTH)
     parser.add_argument(
@@ -378,12 +384,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_f1(args: argparse.Namespace) -> int:
+    if args.f0_dir is None:
+        raise SystemExit("--f0-dir is required for --stage f1")
+    if not args.dry_run:
+        raise SystemExit("F1 formal output is not enabled yet; use --dry-run for development smoke")
+    if args.resume:
+        raise SystemExit("--resume is not supported by the F1 development smoke")
+
+    success_root = resolve_success_root(args.dataset_root)
+    summary, _ = build_f1(
+        success_root=success_root,
+        f0_dir=args.f0_dir,
+        taxonomy_path=args.taxonomy_path,
+        limit_episodes=args.limit_episodes,
+        seed=args.seed,
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.stage == "f1":
+        return _run_f1(args)
     if not args.dry_run and args.output_dir is None:
         raise SystemExit("--output-dir is required unless --dry-run is set")
     if args.dry_run and args.resume:
         raise SystemExit("--resume cannot be combined with --dry-run")
+    if args.filter_path is None:
+        raise SystemExit("--filter-path is required for --stage f0")
 
     summary, records = build_f0(
         dataset_root=args.dataset_root,
