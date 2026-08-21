@@ -49,7 +49,7 @@ def build_final_summary(manifest_dir: Path, action_stats_path: Path) -> dict[str
     else:
         status = "pass"
     return {
-        "pipeline": "fx4_droid_franka_eef_c32_v1",
+        "pipeline": manifest_dir.name,
         "status": status,
         "gates": gates,
         "stage_counts": {stage: summary.get("counts", {}) for stage, summary in summaries.items()},
