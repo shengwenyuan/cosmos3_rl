@@ -505,8 +505,65 @@ def decode_full_range_freeze_ratio(
         return None
 
 
+def _process_video_episode(record: dict[str, Any], success_root: Path, config: F2Config) -> dict[str, Any]:
+    ranges: list[dict[str, Any]] = []
+    for range_record in record["ranges"]:
+        if range_record["f2_motion_status"] != "accepted":
+            ranges.append(range_record)
+            continue
+        frames = range_sample_frames(range_record["pose_frame_start"], range_record["pose_frame_stop"])
+        reasons: list[str] = []
+        camera_results: dict[str, Any] = {}
+        for camera in CAMERA_KEYS:
+            video_meta = record["video_metadata"][camera]
+            path = _video_path(success_root, camera, video_meta)
+            timestamps = [video_meta["from_timestamp"] + frame / config.fps for frame in frames]
+            samples = decode_video_samples(path, timestamps, config)
+            statuses = [sample["status"] for sample in samples]
+            if any(status in {"missing", "container_failure", "decode_failure"} for status in statuses):
+                reasons.append(f"video_decode_failure:{camera}")
+            if "black" in statuses:
+                reasons.append(f"video_black_frame:{camera}")
+            sample_ratio = sample_freeze_ratio(samples, config)
+            full_freeze_ratio = None
+            if sample_ratio > config.frozen_ratio_max and all(status == "ok" for status in statuses):
+                full_freeze_ratio = decode_full_range_freeze_ratio(path, timestamps[0], timestamps[-1], config)
+                if full_freeze_ratio is None:
+                    reasons.append(f"video_full_range_decode_failure:{camera}")
+                elif full_freeze_ratio > config.frozen_ratio_max:
+                    reasons.append(f"video_frozen:{camera}")
+            max_timestamp_error = max((sample.get("timestamp_error_s", 0.0) for sample in samples), default=0.0)
+            if max_timestamp_error > 0.5 / config.fps + config.timestamp_tolerance_s:
+                reasons.append(f"video_timestamp_misaligned:{camera}")
+            camera_results[camera] = {
+                "path": str(path),
+                "sample_frames": frames,
+                "statuses": statuses,
+                "max_timestamp_error_s": max_timestamp_error,
+                "sample_freeze_ratio": sample_ratio,
+                "full_freeze_ratio": full_freeze_ratio,
+            }
+        ranges.append(
+            {
+                **range_record,
+                "video_quality": camera_results,
+                "f2_status": "accepted" if not reasons else "rejected",
+                "f2_reason_codes": reasons,
+            }
+        )
+    episode_status = "accepted" if any(item.get("f2_status") == "accepted" for item in ranges) else "rejected"
+    return {**record, "ranges": ranges, "f2_status": episode_status}
+
+
 def build_f2_video(
-    *, success_root: Path, f2_dir: Path, config: F2Config, limit_episodes: int | None = None
+    *,
+    success_root: Path,
+    f2_dir: Path,
+    config: F2Config,
+    limit_episodes: int | None = None,
+    checkpoint_dir: Path | None = None,
+    resume: bool = False,
+    checkpoint_size: int = 100,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     motion_path = f2_dir / "f2_motion_episodes.jsonl"
     motion_summary_path = f2_dir / "f2_motion_summary.json"
@@ -515,75 +572,62 @@ def build_f2_video(
     records = [record for record in load_jsonl(motion_path) if record["f2_motion_status"] == "accepted"]
     if limit_episodes is not None:
         records = records[:limit_episodes]
+    inputs = {
+        "motion_summary": {"path": str(motion_summary_path), "sha256": sha256_file(motion_summary_path)},
+        "motion_episodes": {"path": str(motion_path), "sha256": sha256_file(motion_path)},
+    }
+    checkpoint_fingerprint = json_fingerprint({"inputs": inputs, "config": config.__dict__, "limit": limit_episodes})
+    if checkpoint_dir is not None:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        if any(checkpoint_dir.glob("part-*.json")) and not resume:
+            raise FileExistsError(f"F2 video checkpoints exist under {checkpoint_dir}; pass --resume")
 
     output_records: list[dict[str, Any]] = []
+    for block_start in range(0, len(records), checkpoint_size):
+        block = records[block_start : block_start + checkpoint_size]
+        part_path = checkpoint_dir / f"part-{block_start // checkpoint_size:05d}.json" if checkpoint_dir else None
+        if part_path is not None and part_path.is_file():
+            payload = json.loads(part_path.read_text())
+            expected_indices = [int(record["episode_index"]) for record in block]
+            if (
+                payload.get("input_fingerprint") != checkpoint_fingerprint
+                or payload.get("episode_indices") != expected_indices
+            ):
+                raise ValueError(f"F2 video checkpoint fingerprint mismatch: {part_path}")
+            block_output = payload["records"]
+        else:
+            block_output = [_process_video_episode(record, success_root, config) for record in block]
+            if part_path is not None:
+                write_json(
+                    part_path,
+                    {
+                        "input_fingerprint": checkpoint_fingerprint,
+                        "episode_indices": [int(record["episode_index"]) for record in block],
+                        "records": block_output,
+                    },
+                )
+        output_records.extend(block_output)
+        print(f"F2 video progress: {len(output_records)}/{len(records)} episodes", flush=True)
+
     reason_counts: collections.Counter[str] = collections.Counter()
-    status_counts: collections.Counter[str] = collections.Counter()
+    status_counts: collections.Counter[str] = collections.Counter(record["f2_status"] for record in output_records)
     camera_sample_counts: collections.Counter[str] = collections.Counter()
     camera_failure_counts: collections.Counter[str] = collections.Counter()
     kept_ranges = 0
     kept_windows = 0
-    for episode_number, record in enumerate(records, start=1):
-        ranges: list[dict[str, Any]] = []
+    for record in output_records:
         for range_record in record["ranges"]:
-            if range_record["f2_motion_status"] != "accepted":
-                ranges.append(range_record)
+            if "f2_status" not in range_record:
                 continue
-            frames = range_sample_frames(range_record["pose_frame_start"], range_record["pose_frame_stop"])
-            reasons: list[str] = []
-            camera_results: dict[str, Any] = {}
-            for camera in CAMERA_KEYS:
-                video_meta = record["video_metadata"][camera]
-                path = _video_path(success_root, camera, video_meta)
-                timestamps = [video_meta["from_timestamp"] + frame / config.fps for frame in frames]
-                samples = decode_video_samples(path, timestamps, config)
-                camera_sample_counts[camera] += len(samples)
-                statuses = [sample["status"] for sample in samples]
-                for status in statuses:
-                    if status != "ok":
-                        camera_failure_counts[f"{camera}:{status}"] += 1
-                if any(status in {"missing", "container_failure", "decode_failure"} for status in statuses):
-                    reasons.append(f"video_decode_failure:{camera}")
-                if "black" in statuses:
-                    reasons.append(f"video_black_frame:{camera}")
-                sample_ratio = sample_freeze_ratio(samples, config)
-                full_freeze_ratio = None
-                if sample_ratio > config.frozen_ratio_max and all(status == "ok" for status in statuses):
-                    full_freeze_ratio = decode_full_range_freeze_ratio(path, timestamps[0], timestamps[-1], config)
-                    if full_freeze_ratio is None:
-                        reasons.append(f"video_full_range_decode_failure:{camera}")
-                    elif full_freeze_ratio > config.frozen_ratio_max:
-                        reasons.append(f"video_frozen:{camera}")
-                max_timestamp_error = max((sample.get("timestamp_error_s", 0.0) for sample in samples), default=0.0)
-                if max_timestamp_error > 0.5 / config.fps + config.timestamp_tolerance_s:
-                    reasons.append(f"video_timestamp_misaligned:{camera}")
-                camera_results[camera] = {
-                    "path": str(path),
-                    "sample_frames": frames,
-                    "statuses": statuses,
-                    "max_timestamp_error_s": max_timestamp_error,
-                    "sample_freeze_ratio": sample_ratio,
-                    "full_freeze_ratio": full_freeze_ratio,
-                }
-            status = "accepted" if not reasons else "rejected"
-            if status == "accepted":
+            reason_counts.update(range_record["f2_reason_codes"])
+            if range_record["f2_status"] == "accepted":
                 kept_ranges += 1
                 kept_windows += int(range_record["window_count"])
-            else:
-                reason_counts.update(reasons)
-            ranges.append(
-                {
-                    **range_record,
-                    "video_quality": camera_results,
-                    "f2_status": status,
-                    "f2_reason_codes": reasons,
-                }
-            )
-        episode_status = "accepted" if any(item.get("f2_status") == "accepted" for item in ranges) else "rejected"
-        status_counts[episode_status] += 1
-        output_records.append({**record, "ranges": ranges, "f2_status": episode_status})
-        if episode_number % 100 == 0:
-            print(f"F2 video progress: {episode_number}/{len(records)} episodes", flush=True)
+            for camera, result in range_record["video_quality"].items():
+                camera_sample_counts[camera] += len(result["statuses"])
+                for status in result["statuses"]:
+                    if status != "ok":
+                        camera_failure_counts[f"{camera}:{status}"] += 1
 
     total_video_samples = sum(camera_sample_counts.values())
     decode_failures = sum(
@@ -592,10 +636,6 @@ def build_f2_video(
         if key.rsplit(":", 1)[-1] in {"missing", "container_failure", "decode_failure"}
     )
     decode_failure_rate = decode_failures / total_video_samples if total_video_samples else 1.0
-    inputs = {
-        "motion_summary": {"path": str(motion_summary_path), "sha256": sha256_file(motion_summary_path)},
-        "motion_episodes": {"path": str(motion_path), "sha256": sha256_file(motion_path)},
-    }
     summary = {
         "stage": "f2",
         "limit_episodes": limit_episodes,
@@ -615,9 +655,7 @@ def build_f2_video(
         },
         "inputs": inputs,
     }
-    summary["input_fingerprint"] = json_fingerprint(
-        {"inputs": inputs, "config": config.__dict__, "limit": limit_episodes}
-    )
+    summary["input_fingerprint"] = checkpoint_fingerprint
     return summary, output_records
 
 

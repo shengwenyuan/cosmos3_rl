@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+import tools.droid.fx4_f2 as fx4_f2
 from tools.droid.fx4_f2 import (
     F2Config,
     build_trajectory,
@@ -15,6 +16,7 @@ from tools.droid.fx4_f2 import (
     smooth_se3,
     trajectory_reason_codes,
 )
+from tools.droid.fx4_io import write_json, write_jsonl
 
 
 def _trajectory(length: int = 40):
@@ -81,3 +83,38 @@ def test_sample_freeze_ratio_uses_adjacent_thumbnail_mad() -> None:
     image = np.zeros((4, 4, 3), dtype=np.uint8) + 100
     samples = [{"status": "ok", "thumbnail": image.copy()} for _ in range(5)]
     assert sample_freeze_ratio(samples, F2Config()) == 1.0
+
+
+def test_video_stage_resumes_from_atomic_parts(tmp_path, monkeypatch) -> None:
+    write_json(tmp_path / "f2_motion_summary.json", {"gates": {"motion": True}})
+    write_jsonl(
+        tmp_path / "f2_motion_episodes.jsonl",
+        [
+            {"episode_index": 1, "f2_motion_status": "accepted", "ranges": []},
+            {"episode_index": 2, "f2_motion_status": "accepted", "ranges": []},
+        ],
+    )
+    checkpoint_dir = tmp_path / "parts"
+    _, first = fx4_f2.build_f2_video(
+        success_root=tmp_path,
+        f2_dir=tmp_path,
+        config=F2Config(),
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_size=1,
+    )
+    assert len(list(checkpoint_dir.glob("part-*.json"))) == 2
+
+    monkeypatch.setattr(
+        fx4_f2,
+        "_process_video_episode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("checkpoint was not reused")),
+    )
+    _, resumed = fx4_f2.build_f2_video(
+        success_root=tmp_path,
+        f2_dir=tmp_path,
+        config=F2Config(),
+        checkpoint_dir=checkpoint_dir,
+        resume=True,
+        checkpoint_size=1,
+    )
+    assert resumed == first

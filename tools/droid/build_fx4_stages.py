@@ -90,6 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f2_dir=output_dir,
             config=F2Config(),
             limit_episodes=args.limit_episodes,
+            checkpoint_dir=None if args.dry_run else output_dir / ".f2_video_checkpoints",
+            resume=args.resume,
         )
         if not args.dry_run:
             write_f2_video(output_dir, summary, records)
