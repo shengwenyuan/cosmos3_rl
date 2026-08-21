@@ -4,7 +4,13 @@
 import numpy as np
 
 from tools.droid.fx4_f2 import F2Config, build_trajectory
-from tools.droid.fx4_f3 import F3Config, candidate_window_starts, cap_episode_candidates, scene_group_id
+from tools.droid.fx4_f3 import (
+    F3Config,
+    assign_group_splits,
+    candidate_window_starts,
+    cap_episode_candidates,
+    scene_group_id,
+)
 
 
 def _trajectory(length: int = 80):
@@ -66,3 +72,12 @@ def test_episode_cap_keeps_each_range_endpoints() -> None:
 
 def test_scene_group_uses_institution_and_collection_date() -> None:
     assert scene_group_id("AUTOLab/success/2023-07-07/Fri_Jul") == "AUTOLab/2023-07-07"
+
+
+def test_group_split_is_deterministic_and_group_atomic() -> None:
+    records = [
+        {"group_id": "lab/day1", "task_family": "pick_place_relocate"},
+        {"group_id": "lab/day1", "task_family": "pick_place_relocate"},
+        {"group_id": "lab/day2", "task_family": "pick_place_relocate"},
+    ]
+    assert assign_group_splits(records, F3Config()) == assign_group_splits(records, F3Config())

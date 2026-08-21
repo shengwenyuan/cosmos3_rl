@@ -296,10 +296,15 @@ def build_f3(
         if record["split"] == "val" or any(item["selected_window_starts_c32"] for item in record["kept_ranges"])
     ]
 
+    all_families = {record["task_family"] for record in records}
     family_counts = collections.Counter(record["task_family"] for record in records if record["split"] == "train")
     largest_family = max(family_counts.values(), default=1)
     for record in records:
-        record["sample_weight"] = min(3.0, math.sqrt(largest_family / family_counts[record["task_family"]]))
+        record["sample_weight"] = (
+            min(3.0, math.sqrt(largest_family / family_counts[record["task_family"]]))
+            if record["split"] == "train"
+            else 1.0
+        )
 
     continuity_failures = 0
     for record in records:
@@ -333,7 +338,9 @@ def build_f3(
         "episode_overlap": len(train_episodes & val_episodes),
         "group_overlap": len(train_groups & val_groups),
         "continuous_15hz_failures": continuity_failures,
-        "all_families_in_val": set(family_counts) <= set(family_split_counts["val"]),
+        "all_families_in_train": all_families <= set(family_split_counts["train"]),
+        "all_families_in_val": all_families <= set(family_split_counts["val"]),
+        "val_ratio_within_one_percent": abs(len(val) / len(records) - config.val_ratio) <= 0.01,
     }
     waypoint_duration_array = np.asarray(waypoint_chunk_durations, dtype=np.float64)
     summary = {
