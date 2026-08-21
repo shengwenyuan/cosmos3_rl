@@ -16,6 +16,7 @@ from tools.droid.build_fx4_manifest import (
     evaluate_range,
     main,
     write_f0_outputs,
+    write_f1_outputs,
 )
 
 
@@ -141,6 +142,20 @@ def test_write_outputs_records_checksums(tmp_path: Path) -> None:
     checksums = (output_dir / "F0_SHA256SUMS").read_text()
     assert "f0_summary.json" in checksums
     assert "f0_episodes.jsonl" in checksums
+
+
+def test_write_f1_outputs_records_checksums(tmp_path: Path) -> None:
+    output_dir = tmp_path / "derived" / "f1"
+    summary = {"stage": "f1", "input_fingerprint": "abc"}
+    records = [{"episode_index": 0, "f1_status": "accepted"}]
+
+    write_f1_outputs(output_dir, summary, records)
+
+    assert json.loads((output_dir / "f1_summary.json").read_text())["stage"] == "f1"
+    assert len((output_dir / "f1_episodes.jsonl").read_text().splitlines()) == 1
+    checksums = (output_dir / "F1_SHA256SUMS").read_text()
+    assert "f1_summary.json" in checksums
+    assert "f1_episodes.jsonl" in checksums
 
 
 def test_non_dry_run_refuses_source_dataset_output(tmp_path: Path) -> None:

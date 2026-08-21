@@ -333,6 +333,19 @@ def write_f0_outputs(output_dir: Path, summary: dict[str, Any], records: list[di
     _atomic_write_text(checksums_path, checksums)
 
 
+def write_f1_outputs(output_dir: Path, summary: dict[str, Any], records: list[dict[str, Any]]) -> None:
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "f1_summary.json"
+    records_path = output_dir / "f1_episodes.jsonl"
+    checksums_path = output_dir / "F1_SHA256SUMS"
+
+    _atomic_write_text(summary_path, json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    _atomic_write_text(records_path, "".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
+    checksums = f"{sha256_file(summary_path)}  {summary_path.name}\n{sha256_file(records_path)}  {records_path.name}\n"
+    _atomic_write_text(checksums_path, checksums)
+
+
 def _validate_complete_f0_output(output_dir: Path, input_fingerprint: str) -> dict[str, Any] | None:
     summary_path = output_dir / "f0_summary.json"
     records_path = output_dir / "f0_episodes.jsonl"
@@ -358,6 +371,31 @@ def _validate_complete_f0_output(output_dir: Path, input_fingerprint: str) -> di
     return existing_summary
 
 
+def _validate_complete_f1_output(output_dir: Path, input_fingerprint: str) -> dict[str, Any] | None:
+    summary_path = output_dir / "f1_summary.json"
+    records_path = output_dir / "f1_episodes.jsonl"
+    checksums_path = output_dir / "F1_SHA256SUMS"
+    paths = (summary_path, records_path, checksums_path)
+    if not any(path.exists() for path in paths):
+        return None
+    if not all(path.is_file() for path in paths):
+        return None
+
+    with summary_path.open() as handle:
+        existing_summary = json.load(handle)
+    if existing_summary.get("input_fingerprint") != input_fingerprint:
+        raise ValueError("Existing F1 output has a different input fingerprint; use a new output directory")
+
+    expected_hashes: dict[str, str] = {}
+    for line in checksums_path.read_text().splitlines():
+        digest, filename = line.split(maxsplit=1)
+        expected_hashes[filename.strip()] = digest
+    for path in (summary_path, records_path):
+        if expected_hashes.get(path.name) != sha256_file(path):
+            raise ValueError(f"Existing F1 output checksum mismatch: {path}")
+    return existing_summary
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=("f0", "f1"), default="f0")
@@ -367,13 +405,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--taxonomy-path", type=Path, default=Path(__file__).with_name("fx4_f1_taxonomy.yaml"))
     parser.add_argument("--limit-episodes", type=int)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--progress-every", type=int, default=5000)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--chunk-length", type=int, default=DEFAULT_CHUNK_LENGTH)
     parser.add_argument(
         "--dry-run", action="store_true", help="Print summary and do not create or modify output files."
     )
     parser.add_argument(
-        "--resume", action="store_true", help="Reuse a complete F0 output with the same input fingerprint."
+        "--resume", action="store_true", help="Reuse a complete stage output with the same input fingerprint."
     )
     parser.add_argument("--check-expected", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--expected-matched-episodes", type=int, default=DEFAULT_EXPECTED_MATCHED_EPISODES)
@@ -387,19 +426,37 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_f1(args: argparse.Namespace) -> int:
     if args.f0_dir is None:
         raise SystemExit("--f0-dir is required for --stage f1")
-    if not args.dry_run:
-        raise SystemExit("F1 formal output is not enabled yet; use --dry-run for development smoke")
-    if args.resume:
-        raise SystemExit("--resume is not supported by the F1 development smoke")
+    if args.dry_run and args.resume:
+        raise SystemExit("--resume cannot be combined with --dry-run")
+    if not args.dry_run and args.output_dir is None:
+        raise SystemExit("--output-dir is required unless --dry-run is set")
+    if not args.dry_run and args.limit_episodes is not None:
+        raise SystemExit("--limit-episodes is only allowed with --dry-run")
 
     success_root = resolve_success_root(args.dataset_root)
-    summary, _ = build_f1(
+    print("F1 build started: loading immutable F0 ledger and task metadata", file=sys.stderr, flush=True)
+    summary, records = build_f1(
         success_root=success_root,
         f0_dir=args.f0_dir,
         taxonomy_path=args.taxonomy_path,
         limit_episodes=args.limit_episodes,
         seed=args.seed,
+        progress_every=args.progress_every,
     )
+    if not args.dry_run:
+        output_dir = args.output_dir.expanduser().resolve()
+        if output_dir == success_root or success_root in output_dir.parents:
+            raise ValueError(f"Refusing to write F1 outputs inside the read-only source dataset: {output_dir}")
+        existing_names = ("f1_summary.json", "f1_episodes.jsonl", "F1_SHA256SUMS")
+        has_existing_f1 = any((output_dir / name).exists() for name in existing_names)
+        if has_existing_f1 and not args.resume:
+            raise FileExistsError(f"F1 output already exists under {output_dir}; pass --resume or use a new directory")
+        if args.resume:
+            existing_summary = _validate_complete_f1_output(output_dir, summary["input_fingerprint"])
+            if existing_summary is not None:
+                print(json.dumps(existing_summary, indent=2, sort_keys=True))
+                return 0
+        write_f1_outputs(output_dir, summary, records)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

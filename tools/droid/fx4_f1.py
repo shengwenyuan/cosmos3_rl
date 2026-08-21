@@ -10,6 +10,7 @@ import hashlib
 import json
 import random
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -188,6 +189,7 @@ def build_f1(
     taxonomy_path: Path,
     limit_episodes: int | None = None,
     seed: int = 42,
+    progress_every: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     f0_dir = f0_dir.expanduser().resolve()
     taxonomy_path = taxonomy_path.expanduser().resolve()
@@ -212,7 +214,7 @@ def build_f1(
     accepted_windows = 0
     examples: dict[str, list[int]] = collections.defaultdict(list)
 
-    for f0_record in f0_records:
+    for record_index, f0_record in enumerate(f0_records, start=1):
         episode_index = int(f0_record["episode_index"])
         if episode_index not in tasks_by_episode:
             raise ValueError(f"Missing tasks metadata for episode {episode_index}")
@@ -237,6 +239,8 @@ def build_f1(
             reason_counts[reason] += 1
             if len(examples[reason]) < 5:
                 examples[reason].append(episode_index)
+        if progress_every and record_index % progress_every == 0:
+            print(f"F1 progress: {record_index}/{len(f0_records)} episodes", file=sys.stderr, flush=True)
 
     with f0_summary_path.open() as handle:
         f0_summary = json.load(handle)
