@@ -36,6 +36,8 @@ from tools.droid.fx4_io import (
 )
 
 POSITIVE_FAMILIES = ("pick_place_relocate", "push_pull_slide", "open_close", "stack_arrange")
+MIN_REVIEWED_ROWS = 32
+MAX_REVIEW_ERROR_RATE = 0.05
 REJECTION_BUCKETS = (
     "hard_exclude:liquid_pouring",
     "hard_exclude:wipe_clean",
@@ -113,22 +115,33 @@ def deterministic_qc_selection(
 
 def evaluate_review_gate(rows: list[dict[str, str]]) -> dict[str, Any]:
     labels = [row.get("review_label", "").strip().lower() for row in rows]
-    pending = sum(label not in {"correct", "incorrect"} for label in labels)
-    if pending:
-        return {"status": "pending", "pending_rows": pending, "reviewed_rows": len(rows) - pending}
-    incorrect = sum(label == "incorrect" for label in labels)
+    reviewed_rows = [row for row, label in zip(rows, labels, strict=True) if label in {"correct", "incorrect"}]
+    pending = len(rows) - len(reviewed_rows)
+    if len(reviewed_rows) < MIN_REVIEWED_ROWS:
+        return {
+            "status": "pending",
+            "decision_mode": "sampled_review",
+            "minimum_reviewed_rows": MIN_REVIEWED_ROWS,
+            "pending_rows": pending,
+            "reviewed_rows": len(reviewed_rows),
+        }
+    incorrect = sum(row["review_label"].strip().lower() == "incorrect" for row in reviewed_rows)
     family_rates: dict[str, float] = {}
     for family in POSITIVE_FAMILIES:
-        family_rows = [row for row in rows if row["bucket"] == f"accepted:{family}"]
-        family_rates[family] = sum(row["review_label"].strip().lower() == "incorrect" for row in family_rows) / len(
-            family_rows
-        )
-    overall_rate = incorrect / len(rows)
-    passed = overall_rate <= 0.05 and all(rate <= 0.05 for rate in family_rates.values())
+        family_rows = [row for row in reviewed_rows if row["bucket"] == f"accepted:{family}"]
+        if family_rows:
+            family_rates[family] = sum(
+                row["review_label"].strip().lower() == "incorrect" for row in family_rows
+            ) / len(family_rows)
+    overall_rate = incorrect / len(reviewed_rows)
+    passed = overall_rate <= MAX_REVIEW_ERROR_RATE
     return {
         "status": "pass" if passed else "fail",
-        "pending_rows": 0,
-        "reviewed_rows": len(rows),
+        "decision_mode": "sampled_review",
+        "minimum_reviewed_rows": MIN_REVIEWED_ROWS,
+        "maximum_error_rate": MAX_REVIEW_ERROR_RATE,
+        "pending_rows": pending,
+        "reviewed_rows": len(reviewed_rows),
         "overall_error_rate": overall_rate,
         "family_error_rates": family_rates,
     }

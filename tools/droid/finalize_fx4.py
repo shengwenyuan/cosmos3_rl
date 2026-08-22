@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
+from tools.droid.fx4_f4 import read_review_gate
 from tools.droid.fx4_io import atomic_write_text, sha256_file, write_checksums, write_json
 
 
@@ -31,7 +32,8 @@ def build_final_summary(manifest_dir: Path, action_stats_path: Path) -> dict[str
             ("f4", "f4_summary.json"),
         )
     }
-    f4_review = summaries["f4"]["gates"]["semantic_review"]
+    review_path = manifest_dir / "qc_review.csv"
+    f4_review = read_review_gate(review_path) if review_path.is_file() else summaries["f4"]["gates"]["semantic_review"]
     f3_gates_pass = all(value if isinstance(value, bool) else value == 0 for value in summaries["f3"]["gates"].values())
     gates = {
         "f0_official_counts": bool(summaries["f0"].get("expected_counts_match")),
@@ -52,6 +54,7 @@ def build_final_summary(manifest_dir: Path, action_stats_path: Path) -> dict[str
         "pipeline": manifest_dir.name,
         "status": status,
         "gates": gates,
+        "f4_semantic_review": f4_review,
         "stage_counts": {stage: summary.get("counts", {}) for stage, summary in summaries.items()},
         "action_stats": {"path": str(action_stats_path), "sha256": sha256_file(action_stats_path)},
     }

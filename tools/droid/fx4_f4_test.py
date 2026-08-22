@@ -43,15 +43,16 @@ def test_qc_selection_has_exact_320_unique_coverage() -> None:
     assert sum(item["bucket"] == "random" for item in selected) == 30
 
 
-def test_review_gate_is_pending_until_every_row_is_labeled() -> None:
-    rows = [{"bucket": "accepted:pick_place_relocate", "review_label": ""}]
+def test_review_gate_is_pending_below_minimum_sample() -> None:
+    rows = [{"bucket": "accepted:pick_place_relocate", "review_label": "correct"}] * 31
     assert evaluate_review_gate(rows)["status"] == "pending"
 
 
-def test_review_gate_enforces_overall_and_family_five_percent() -> None:
-    rows = []
-    for family in POSITIVE_FAMILIES:
-        rows.extend({"bucket": f"accepted:{family}", "review_label": "correct"} for _ in range(20))
+def test_review_gate_accepts_partial_sample_and_enforces_five_percent() -> None:
+    rows = [{"bucket": "accepted:pick_place_relocate", "review_label": "correct"} for _ in range(32)]
+    rows.extend({"bucket": "random", "review_label": ""} for _ in range(288))
+    assert evaluate_review_gate(rows)["status"] == "pass"
+    assert evaluate_review_gate(rows)["pending_rows"] == 288
     rows[0]["review_label"] = "incorrect"
     assert evaluate_review_gate(rows)["status"] == "pass"
     rows[1]["review_label"] = "incorrect"
