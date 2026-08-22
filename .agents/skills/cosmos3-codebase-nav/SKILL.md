@@ -6,9 +6,22 @@ description: >
   "how do I find the config for Y", "where are the defaults", "where do I change a
   parameter", or any question about locating files, modules, or settings. Also use
   when the user opens or edits files and needs orientation.
+  Also use for Cosmos3 implementation and review work to enforce the project's
+  readability, abstraction, and concision standards.
 ---
 
 # Cosmos3 Codebase Navigation
+
+## Engineering style
+
+Apply these rules to every code change and review:
+
+- Optimize for first-pass readability: make ownership, data flow, invariants, and failure paths obvious.
+- Use the fewest concepts, not the fewest characters. Prefer direct control flow and precise names over clever compression.
+- Abstract only stable domain concepts or repeated policy. Keep abstractions small, explicit, and single-purpose; remove pass-through layers and speculative generality.
+- Keep public interfaces minimal. Localize complexity behind one clear boundary and keep call sites unsurprising.
+- Write comments only for contracts, constraints, or rationale the code cannot express.
+- Before finishing, simplify the diff: delete duplication, dead indirection, redundant state, and unnecessary prose without hiding behavior.
 
 ## When to use this skill
 
