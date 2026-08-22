@@ -19,7 +19,6 @@ from typing import Any
 
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
-from cosmos_framework.data.generator.action.datasets.droid_merged_lerobot_dataset import DROIDMergedLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset import (
     DROID_CONCAT_VIEW_DESCRIPTION,
     DROIDLeRobotDataset,
@@ -33,6 +32,7 @@ from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset_confi
     IMAGE_FEATURES,
     SOURCE_GRIPPER_SEMANTICS,
 )
+from cosmos_framework.data.generator.action.datasets.droid_merged_lerobot_dataset import DROIDMergedLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
 from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
 
@@ -113,10 +113,15 @@ def get_action_droid_sft_dataset(
     mode: str = "wam",
     use_state: bool = True,
     action_normalization: str | None = None,
+    action_stats_path: str | None = None,
+    apply_forward_clamp: bool = False,
     viewpoint: str = "concat_view",
     use_image_augmentation: bool = False,
     use_filter_dict: bool = False,
     filter_dict_path: str | None = None,
+    training_manifest_path: str | None = None,
+    pose_smoothing_window: int | None = None,
+    split: str = "train",
     resolution: str | int = "256",
     max_action_dim: int = 64,
     tokenizer_config: dict | None = None,
@@ -146,9 +151,14 @@ def get_action_droid_sft_dataset(
         mode=mode,
         use_state=use_state,
         action_normalization=action_normalization,
+        action_stats_path=action_stats_path,
+        apply_forward_clamp=apply_forward_clamp,
         use_image_augmentation=use_image_augmentation,  # i4: bundles random-crop+resize+ColorJitter
         use_filter_dict=use_filter_dict,
         filter_dict_path=filter_dict_path,
+        training_manifest_path=training_manifest_path,
+        pose_smoothing_window=pose_smoothing_window,
+        split=split,
         use_success_only=use_success_only,
         dataset_profile=dataset_profile,
         view_description=view_description,

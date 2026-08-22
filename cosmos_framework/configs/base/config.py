@@ -81,8 +81,8 @@ def make_config() -> Config:
     # from cosmos_framework.configs.base.defaults.data import register_data
     from cosmos_framework.configs.base.defaults.model import register_model
     from cosmos_framework.configs.base.defaults.optimizer import register_optimizer, register_scheduler
-    from cosmos_framework.configs.base.defaults.tokenizer import register_sound_tokenizer, register_tokenizer
     from cosmos_framework.configs.base.defaults.reasoner import register_vlm
+    from cosmos_framework.configs.base.defaults.tokenizer import register_sound_tokenizer, register_tokenizer
 
     # Call this function to register config groups for advanced overriding. the order follows the default config groups
     # register_data()
@@ -100,18 +100,19 @@ def make_config() -> Config:
     # Register shipped experiments explicitly. (vision_sft_nano also defines
     # vision_sft_nano_mapstyle_dataloader — the CosmosDataLoader variant — in the same module.)
     # UR5 post-training extensions retained by cosmos3_rl.
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_fd_droid_posttrain  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_berkeley_ur5_eef_nano  # noqa: F401, E501
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_eef_edge  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_nano  # noqa: F401
-    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_fd_droid_posttrain  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robomind_ur5_dual_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robomind_ur5_single_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_ur5_single_eef_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_ur5_single_joint_nano  # noqa: F401, E501
+    import cosmos_framework.configs.base.experiment.sft.vision_sft_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.sft.vision_sft_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.sft.vision_sft_super  # noqa: F401
-    import cosmos_framework.configs.base.experiment.sft.vision_sft_edge  # noqa: F401
 
     return c

@@ -4,6 +4,7 @@
 import json
 import os
 import random
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any, cast
 
@@ -80,7 +81,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         which does not exist; the shipped file is ``droid_lerobot_stats.json``
         one directory up, matching every other action dataset.
         """
-        return _NORMALIZER_PATH
+        return self._action_stats_path or _NORMALIZER_PATH
 
     def __init__(
         self,
@@ -110,8 +111,12 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         # parameters above are positional-or-keyword, so inserting mid-list
         # would shift every later argument for positional callers.
         apply_forward_clamp: bool = False,
+        action_stats_path: str | None = None,
+        training_manifest_path: str | None = None,
+        pose_smoothing_window: int | None = None,
     ) -> None:
         """ """
+        self._action_stats_path = Path(action_stats_path).expanduser() if action_stats_path else None
         super().__init__(
             fps=fps,
             chunk_length=chunk_length,
@@ -134,6 +139,40 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         self._use_state = use_state
         self._use_filter_dict = use_filter_dict
         self._filter_dict_path = filter_dict_path or _FILTER_DICT_PATH
+        if training_manifest_path and use_filter_dict:
+            raise ValueError("training_manifest_path and use_filter_dict are mutually exclusive")
+        self._training_manifest_path = Path(training_manifest_path).expanduser() if training_manifest_path else None
+        self._training_manifest: dict[int, dict[str, Any]] | None = None
+        self._manifest_sample_rows: list[list[int]] = []
+        self._episode_row_bounds: dict[tuple[int, int], tuple[int, int]] = {}
+        if self._training_manifest_path is not None:
+            records: dict[int, dict[str, Any]] = {}
+            with self._training_manifest_path.open() as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if record.get("split") != self._split:
+                        raise ValueError(
+                            f"{self._training_manifest_path}:{line_number}: split={record.get('split')!r} "
+                            f"does not match dataset split={self._split!r}"
+                        )
+                    episode_index = int(record["episode_index"])
+                    if episode_index in records:
+                        raise ValueError(f"duplicate episode_index={episode_index} in {self._training_manifest_path}")
+                    records[episode_index] = record
+            if not records:
+                raise ValueError(
+                    f"training manifest contains no {self._split!r} records: {self._training_manifest_path}"
+                )
+            self._training_manifest = records
+        if pose_smoothing_window is not None and (pose_smoothing_window < 3 or pose_smoothing_window % 2 == 0):
+            raise ValueError("pose_smoothing_window must be odd and at least 3")
+        if pose_smoothing_window is not None and action_space != "ee_pose_delta":
+            raise ValueError("pose_smoothing_window is only valid for action_space='ee_pose_delta'")
+        if pose_smoothing_window is not None and self._training_manifest_path is None:
+            raise ValueError("pose_smoothing_window requires training_manifest_path for exact episode bounds")
+        self._pose_smoothing_window = pose_smoothing_window
         self._max_num_history_actions = max_num_history_actions
         self._use_image_augmentation = use_image_augmentation
         if not view_description.strip():
@@ -165,9 +204,12 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             lerobot_roots = [x for x in lerobot_roots if x.split("/", 1)[0] == "success"]
 
         self._all_shard_roots = [os.path.join(root, x) for x in lerobot_roots] if lerobot_roots else [root]
+        if self._training_manifest_path is not None and len(self._all_shard_roots) != 1:
+            raise ValueError("training_manifest_path currently requires one unsharded DROID source")
 
         observation_ts = [i * self._dt for i in range(0, self._chunk_length + 1)]
-        action_ts = [i * self._dt for i in range(0, self._chunk_length)]
+        action_start = 1 if self._action_space == "ee_pose_delta" else 0
+        action_ts = [i * self._dt for i in range(action_start, action_start + self._chunk_length)]
         if self._max_num_history_actions > 0 and self._action_space in ("midtrain", "joint_pos"):
             observation_ts_ext = [i * self._dt for i in range(-self._max_num_history_actions, self._chunk_length + 1)]
             action_ts_ext = [i * self._dt for i in range(-self._max_num_history_actions, self._chunk_length)]
@@ -208,6 +250,9 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
 
     def _append_index_records(self, *, meta, ds_idx: int, dataset_label: str | None = None) -> None:
         """ """
+        if self._training_manifest is not None:
+            self._append_manifest_index_records(meta=meta, ds_idx=ds_idx, dataset_label=dataset_label)
+            return
         if not self._use_filter_dict:
             super()._append_index_records(meta=meta, ds_idx=ds_idx, dataset_label=dataset_label)
             return
@@ -248,6 +293,104 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             log.info(
                 f"{class_name}{label}: kept {filtered_count} / {sample_count} ({100.0 * filtered_count / sample_count:.2f} %) samples"
             )
+
+    def _append_manifest_index_records(self, *, meta, ds_idx: int, dataset_label: str | None = None) -> None:
+        """Index exactly the F3-selected starts while retaining episode-local shuffle blocks."""
+        assert self._training_manifest is not None
+        if ds_idx != 0:
+            raise ValueError("F3 training manifests are indexed against one unsharded DROID source")
+
+        from_indices = [int(value) for value in meta.episodes["dataset_from_index"]]
+        to_indices = [int(value) for value in meta.episodes["dataset_to_index"]]
+        episode_ids = list(meta.episodes["episode_id"])
+        kept = 0
+        for episode_index, record in sorted(self._training_manifest.items()):
+            if episode_index < 0 or episode_index >= len(from_indices):
+                raise ValueError(f"manifest episode_index={episode_index} is outside DROID metadata")
+            metadata_episode_id = str(episode_ids[episode_index])
+            if metadata_episode_id != str(record["episode_id"]):
+                raise ValueError(
+                    f"manifest episode identity mismatch at {episode_index}: "
+                    f"metadata={metadata_episode_id!r}, manifest={record['episode_id']!r}"
+                )
+            episode_start = from_indices[episode_index]
+            episode_stop = to_indices[episode_index]
+            episode_length = episode_stop - episode_start
+            starts = sorted(
+                {
+                    int(start)
+                    for kept_range in record["kept_ranges"]
+                    for start in kept_range["selected_window_starts_c32"]
+                }
+            )
+            if any(start < 0 or start + self._chunk_length >= episode_length for start in starts):
+                raise ValueError(
+                    f"manifest contains an out-of-bounds c{self._chunk_length} start for episode {episode_index}"
+                )
+            if not starts:
+                continue
+            rows = [episode_start + start for start in starts]
+            self._episode_records.append((ds_idx, episode_start, len(rows), episode_index))
+            self._manifest_sample_rows.append(rows)
+            self._episode_row_bounds[(ds_idx, episode_index)] = (episode_start, episode_stop)
+            self._num_valid_indices += len(rows)
+            self._episode_cum_ends.append(self._num_valid_indices)
+            kept += len(rows)
+
+        label = f" [{dataset_label}]" if dataset_label else ""
+        log.info(
+            f"{self.__class__.__name__}{label}: manifest split={self._split}, "
+            f"episodes={len(self._episode_records)}, selected c{self._chunk_length} windows={kept}"
+        )
+
+    def _resolve_index(self, idx: int) -> tuple[int, int, int, int]:
+        if self._training_manifest is None:
+            return super()._resolve_index(idx)
+        if idx < 0:
+            idx += self._num_valid_indices
+        if idx < 0 or idx >= self._num_valid_indices:
+            raise IndexError(f"{self.__class__.__name__} index {idx} out of range for size {self._num_valid_indices}")
+        span_index = bisect_right(self._episode_cum_ends, idx)
+        span_start = 0 if span_index == 0 else self._episode_cum_ends[span_index - 1]
+        frame_offset = idx - span_start
+        dataset_index, _, _, episode_id = self._episode_records[span_index]
+        return dataset_index, self._manifest_sample_rows[span_index][frame_offset], episode_id, frame_offset
+
+    def _smoothed_eef_pose_window(self, dataset_idx: int, row_idx: int, episode_id: int) -> tuple[np.ndarray, R]:
+        """Reproduce F2's local SE(3) smoothing with enough neighboring context."""
+        if self._pose_smoothing_window is None:
+            raise RuntimeError("pose smoothing is not enabled")
+        episode_start, episode_stop = self._episode_row_bounds[(dataset_idx, episode_id)]
+        radius = self._pose_smoothing_window // 2
+        context_start = max(episode_start, row_idx - radius)
+        context_stop = min(episode_stop, row_idx + self._chunk_length + 1 + radius)
+        values = self._get_dataset(dataset_idx).hf_dataset[context_start:context_stop][self._state_features]
+        state = np.asarray(values, dtype=np.float64)
+        if state.ndim != 2 or state.shape[1] != 6:
+            raise ValueError(f"invalid DROID EEF state context shape: {state.shape}")
+
+        raw_rotation = R.from_euler("xyz", state[:, 3:6])
+        smooth_xyz = state[:, :3].copy()
+        smooth_matrices = raw_rotation.as_matrix().copy()
+        full_weights = np.arange(1, radius + 2, dtype=np.float64)
+        full_weights = np.concatenate((full_weights, full_weights[-2::-1]))
+        for index in range(1, len(state) - 1):
+            start = max(0, index - radius)
+            stop = min(len(state), index + radius + 1)
+            weight_start = radius - (index - start)
+            weights = full_weights[weight_start : weight_start + stop - start]
+            weights /= weights.sum()
+            smooth_xyz[index] = np.sum(state[start:stop, :3] * weights[:, None], axis=0)
+            center = raw_rotation[index]
+            relative = center.inv() * raw_rotation[start:stop]
+            correction = np.sum(relative.as_rotvec() * weights[:, None], axis=0)
+            smooth_matrices[index] = (center * R.from_rotvec(correction)).as_matrix()
+
+        target_start = row_idx - context_start
+        target_stop = target_start + self._chunk_length + 1
+        if target_stop > len(state):
+            raise ValueError(f"insufficient DROID EEF smoothing context for row {row_idx}")
+        return smooth_xyz[target_start:target_stop], R.from_matrix(smooth_matrices[target_start:target_stop])
 
     def _register_sources(self, indices: list[int] | None = None) -> None:
         """ """
@@ -375,6 +518,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         """ """
+        dataset_idx, row_idx, episode_id, _ = self._resolve_index(idx)
         mode, _, _, sample = self._fetch_sample(idx)
 
         if self._has_multi_language_annotations:
@@ -462,10 +606,15 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
                 ).float()
                 action = torch.cat([initial_state.unsqueeze(0), action], dim=0)
         if self._action_space == "ee_pose_delta":
-            state = sample[self._state_features]
-            pose = np.tile(np.eye(4), (state.shape[0], 1, 1))
-            pose[:, :3, :3] = R.from_euler("xyz", state[:, 3:6]).as_matrix()
-            pose[:, :3, 3] = state[:, 0:3]
+            if self._pose_smoothing_window is None:
+                state = np.asarray(sample[self._state_features], dtype=np.float64)
+                xyz = state[:, :3]
+                rotation = R.from_euler("xyz", state[:, 3:6])
+            else:
+                xyz, rotation = self._smoothed_eef_pose_window(dataset_idx, row_idx, episode_id)
+            pose = np.tile(np.eye(4), (len(xyz), 1, 1))
+            pose[:, :3, :3] = rotation.as_matrix()
+            pose[:, :3, 3] = xyz
             pose_delta = np.linalg.inv(pose[0]) @ pose[1:]
             gripper = sample[self._action_features].unsqueeze(-1)
             gripper = self._gripper_to_model_semantics(gripper)
