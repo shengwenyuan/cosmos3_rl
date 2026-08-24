@@ -6,7 +6,7 @@
 
 ## 1. 目标
 
-在不修改原始数据集的前提下，为 RH20T CFG4 生成可复现、可审计的清洗索引。首版规则为“累计 3 mm SE(3) 增量”与“夹爪事件、显著触力事件、安全时间间隔”取并集。
+在不修改原始数据集的前提下，为 RH20T CFG4 生成可复现、可审计的清洗索引。首版规则为“累计 3 mm SE(3) 增量”与“夹爪事件、安全时间间隔”取并集。
 
 原始数据只读路径：
 
@@ -23,7 +23,7 @@
 - 高质量 episode 抽样的原始相机对齐轨迹平均 474.5 帧、平均 61.5 秒。
 - 原始有效频率中位约 7.0 Hz，不能使用 MP4 容器声明的 25 FPS 代替真实时间戳。
 - Wrist 相机有效视频覆盖明显低于外部相机，清洗层必须记录逐相机可用性，不能假设八相机齐全。
-- 3 mm SE(3) 单独保留约 66.8% 帧；加入夹爪和显著 wrench 变化后约保留 77.7% 帧、76.7% 的 20-step window。
+- 3 mm SE(3) 单独保留约 66.8% 帧；加入夹爪和最大间隔保护后的最终保留率由正式 dry-run 冻结。
 
 ## 3. v1 清洗规则
 
@@ -37,7 +37,7 @@ scene in [1, 10]
 rating >= 2
 calib_quality in [1, 2, 3]
 非 *_human 目录
-metadata、tcp_base、force_torque_base、gripper 至少可读
+metadata、tcp_base、gripper 至少可读
 ```
 
 不满足条件的条目写入 `rejected_episodes.jsonl`，保留明确 reason code，不静默丢弃。
@@ -50,15 +50,14 @@ metadata、tcp_base、force_torque_base、gripper 至少可读
 transformed/tcp_base.npy["104122062295"]
 ```
 
-原因：该外部相机覆盖率高，且现有探针已验证其时间戳、base-frame TCP、力和夹爪数据可对齐。
+原因：该外部相机覆盖率高，且现有探针已验证其时间戳、base-frame TCP 和夹爪数据可对齐。
 
 处理要求：
 
 1. 仅保留 `timestamp <= metadata.finish_time`。
 2. 时间戳升序排序并去重。
 3. 检查 quaternion 有限且模长有效。
-4. 同步读取相同 serial 下的 `force_torque_base`。
-5. 原始毫秒时间戳、相邻 `delta_t` 必须保留在 manifest 中。
+4. 原始毫秒时间戳、相邻 `delta_t` 必须保留在 manifest 中。
 
 若主 serial 缺失，v1 直接拒绝该 episode；fallback serial 留到 v2，避免混入未经验证的外参链。
 
@@ -79,12 +78,8 @@ d_i = ||p_i - p_(i-1)||_2 + 0.05 m/rad * geodesic_angle(R_i, R_(i-1))
 以下索引与 SE(3) 索引取并集：
 
 - 夹爪命令显著变化：沿用数据量纲下 `abs(delta_gripper_command) >= 0.5` 的首版阈值。
-- 显著 wrench 变化：`||delta_force|| >= 2 N` 或 `||delta_torque|| >= 0.10 Nm`。
-- 接触状态切换：建议加入 3 N 进入、2 N 退出的滞回状态机。
 - Episode 首帧、末帧。
 - 最大时间间隔保护：相邻保留帧的原始时间差不得超过 0.5 秒；超出时从原时间线补点。
-
-力事件至少连续两帧满足条件才触发，避免 ATI 噪声导致“几乎所有帧都保留”。阈值和 debounce 必须写入 manifest 的 `cleaning_config`。
 
 ### 3.5 多相机对齐
 
@@ -107,7 +102,6 @@ d_i = ||p_i - p_(i-1)||_2 + 0.05 m/rad * geodesic_angle(R_i, R_(i-1))
 │   ├── schema.py
 │   ├── alignment.py
 │   ├── se3.py
-│   ├── force_events.py
 │   └── cleaning.py
 ├── scripts/
 │   ├── build_clean_manifest.py
@@ -124,9 +118,7 @@ python -m rh20t_tools.scripts.build_clean_manifest \
   --scene-min 1 --scene-max 10 \
   --min-rating 2 --calib-quality 1 2 3 \
   --se3-step-m 0.003 --rotation-weight-m-per-rad 0.05 \
-  --force-delta-n 2.0 --torque-delta-nm 0.10 \
-  --contact-enter-n 3.0 --contact-exit-n 2.0 \
-  --event-debounce-frames 2 --max-gap-s 0.5 \
+  --max-gap-s 0.5 \
   --dry-run
 ```
 
@@ -151,7 +143,7 @@ cfg4_clean_3mm_se3_v1/
 episode_id, cleaned_index
 source_timestamp_ms, source_delta_t_s
 tcp_xyz, tcp_quat_wxyz
-wrench_zeroed[6], gripper_command
+gripper_command
 keep_reason bitmask
 camera.<serial>.source_frame_index
 camera.<serial>.source_timestamp_ms
@@ -159,7 +151,7 @@ camera.<serial>.alignment_error_ms
 camera.<serial>.available
 ```
 
-`keep_reason` 至少区分 `FIRST/LAST/SE3/GRIPPER/WRENCH/CONTACT/MAX_GAP`，便于后续统计每类规则贡献。
+`keep_reason` 至少区分 `FIRST/LAST/SE3/GRIPPER/MAX_GAP`，便于后续统计每类规则贡献。
 
 ## 6. 验证与验收
 
@@ -168,7 +160,7 @@ camera.<serial>.available
 - Quaternion 正负号不影响旋转角。
 - 累计弧长往返运动不被抵消。
 - 首尾帧必保留。
-- 事件并集和 debounce 正确。
+- 事件并集正确。
 - 最大时间间隔补点正确。
 - 相机最近邻对齐不跨 episode。
 
@@ -177,13 +169,12 @@ camera.<serial>.available
 - 输入原始目录 mtime 和文件哈希抽样不发生变化。
 - 所有输出时间戳严格递增。
 - 所有保留索引均可映射回原始条目。
-- 3 mm+事件后总体帧保留率预期为 70%–82%；超出范围必须人工审计。
+- 总体帧保留率由正式 dry-run 冻结；异常偏离必须人工审计。
 - 16-step window 数量、每任务episode数、相机覆盖率均写入 summary。
-- 随机抽查至少 30 个 episode，并渲染首/中/尾片段叠加 EEF、力、夹爪和 keep reason。
+- 随机抽查至少 30 个 episode，并渲染首/中/尾片段叠加 EEF、夹爪和 keep reason。
 
 ## 7. 风险与待决策
 
-- “触力变化”阈值仍需通过传感器噪声直方图确认；任意浮点变化不可作为事件。
 - 等空间采样产生可变真实时间间隔，不能再把每个动作步严格解释成固定 `1/fps` 秒。
 - 任务文本映射不在当前 episode metadata 中，需要在 LeRobot 转换前建立经过人工审核的 task catalog。
 - Wrist 缺失率高，首版训练采用哪些视角由转换计划中的数据变体实验决定。

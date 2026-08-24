@@ -28,7 +28,7 @@ def _fake_action_factory(
     sources=None,
     fps=15.0,
     chunk_length=32,
-    mode="policy",
+    mode="wam",
     viewpoint="concat_view",
     action_normalization=None,
     resolution="480",
@@ -111,7 +111,7 @@ def _config_with_dataset(**values):
     values.setdefault("_target_", _fake_action_factory)
     values.setdefault("fps", 15.0)
     values.setdefault("chunk_length", 32)
-    values.setdefault("mode", "policy")
+    values.setdefault("mode", "wam")
     values.setdefault("viewpoint", "concat_view")
     values.setdefault("action_normalization", None)
     values.setdefault("resolution", "480")
@@ -189,8 +189,8 @@ def test_manifest_validates_layout_and_rejects_unbound_normalization() -> None:
         ActionPolicyManifest.model_validate(raw)
 
     raw = _raw_manifest()
-    raw["normalization"] = {"kind": "affine", "offset": [0.0] * 3, "scale": [1.0] * 3}
-    with pytest.raises(ValueError, match="Input should be 'none'"):
+    raw["normalization"] = {"kind": "quantile_rot"}
+    with pytest.raises(ValueError, match="stats_file and sha256"):
         ActionPolicyManifest.model_validate(raw)
 
     raw = _raw_manifest()

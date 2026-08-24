@@ -31,6 +31,7 @@ from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset_confi
     COSMOS3_DROID_SUCCESS_PROFILE,
     IMAGE_FEATURES,
     SOURCE_GRIPPER_SEMANTICS,
+    STATE_FEATURES,
 )
 from cosmos_framework.data.generator.action.datasets.droid_merged_lerobot_dataset import DROIDMergedLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
@@ -254,22 +255,41 @@ def _validate_droid_action_policy_manifest(dataset_config: Any, manifest: Any) -
         raise ValueError("The dedicated DROID adapter requires exactly one dataset source")
     source = manifest.datasets[0]
     images = IMAGE_FEATURES[profile]
+    action_space = getattr(dataset_config, "action_space", None)
+    if action_space == "ee_pose_delta":
+        model_codec = "eef_delta"
+        model_layout = (
+            "delta_x", "delta_y", "delta_z",
+            "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5",
+            "gripper",
+        )
+        condition_source = "none"
+        action_features = (STATE_FEATURES[profile], ACTION_FEATURES[profile])
+        state_features = ()
+    elif action_space == "joint_pos":
+        model_codec = "joint_position"
+        model_layout = tuple(f"joint_{index}" for index in range(7)) + ("gripper",)
+        condition_source = "observation_state_t0"
+        action_features = (_JOINT_ACTION_FEATURE, ACTION_FEATURES[profile])
+        state_features = (_JOINT_STATE_FEATURE, _GRIPPER_STATE_FEATURE)
+    else:
+        raise ValueError(f"Manifest-bound DROID training does not support action_space={action_space!r}")
     expected = {
         "robot": "droid",
         "domain_name": "droid_lerobot",
-        "model_codec": "joint_position",
-        "model_layout": tuple(f"joint_{index}" for index in range(7)) + ("gripper",),
+        "model_codec": model_codec,
+        "model_layout": model_layout,
         "model_gripper": "open_fraction",
         "source_name": profile,
-        "condition_source": "observation_state_t0",
-        "action_features": (_JOINT_ACTION_FEATURE, ACTION_FEATURES[profile]),
-        "state_features": (_JOINT_STATE_FEATURE, _GRIPPER_STATE_FEATURE),
+        "condition_source": condition_source,
+        "action_features": action_features,
+        "state_features": state_features,
         "camera_features": {
             "primary": images["wrist"],
             "aux_left": images["left"],
             "aux_right": images["right"],
         },
-        "source_layout": tuple(f"joint_{index}" for index in range(7)) + ("gripper",),
+        "source_layout": model_layout,
         "source_gripper": SOURCE_GRIPPER_SEMANTICS[profile],
         "layout_id": "primary_top_aux_bottom_pair",
         "view_shape_hw": (360, 640),

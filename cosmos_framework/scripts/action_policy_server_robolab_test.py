@@ -136,6 +136,7 @@ def _eef_manifest() -> ActionPolicyManifest:
         ],
         "representation": "delta",
         "frame": "berkeley_tcp",
+        "pose_convention": "backward_anchored",
         "gripper": {"index": 9, "semantics": "close_fraction"},
     }
     raw["wire_action"] = {
@@ -151,6 +152,11 @@ def _eef_manifest() -> ActionPolicyManifest:
         "history_rows": 0,
         "source": "none",
         "timing": "four future SE(3) deltas without a state row",
+    }
+    raw["decoder_anchor"] = {
+        "kind": "current_eef_pose",
+        "frame": "berkeley_tcp",
+        "quaternion_order": "xyzw",
     }
     raw["datasets"][0].update(
         condition_source="none",
@@ -309,6 +315,7 @@ def test_joint_observation_converts_wire_close_fraction_once(model_semantics: st
     manifest = _manifest(model_gripper=model_semantics)
     service = object.__new__(robolab_server.RobolabPolicyService)
     service.cfg = _service_config(manifest)
+    service._action_normalizer = None
     service._transform = lambda sample, resolution, action_normalizer=None: sample
 
     image = np.zeros((4, 5, 3), dtype=np.uint8)
@@ -343,6 +350,7 @@ def test_eef_manifest_returns_full_absolute_wire_horizon() -> None:
     manifest = _eef_manifest()
     service = object.__new__(robolab_server.RobolabPolicyService)
     service.cfg = _service_config(manifest)
+    service._action_normalizer = None
     service._lock = threading.Lock()
 
     def transform(sample, resolution, action_normalizer=None):
@@ -359,8 +367,7 @@ def test_eef_manifest_returns_full_absolute_wire_horizon() -> None:
         {
             "prompt": "move",
             "observation/image": np.zeros((4, 5, 3), dtype=np.uint8),
-            "observation/eef_pos": np.array([0.1, 0.2, 0.3], dtype=np.float32),
-            "observation/eef_quat": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            "observation/eef_pose": np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
             "observation/gripper_position": np.array([0.25], dtype=np.float32),
         }
     )
@@ -368,6 +375,29 @@ def test_eef_manifest_returns_full_absolute_wire_horizon() -> None:
     assert result["action"].shape == (4, 8)
     np.testing.assert_allclose(result["action"][:, :3], [[0.1, 0.2, 0.3]] * 4, atol=1e-6)
     np.testing.assert_allclose(result["action"][:, 7], 0.75)
+
+
+def test_eef_decoder_honors_nonzero_backward_anchored_trajectory() -> None:
+    delta = np.zeros((2, 9), dtype=np.float32)
+    delta[:, 3:9] = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    delta[0, :3] = [0.1, 0.0, 0.0]
+    delta[1, :3] = [0.0, 0.1, 0.0]
+
+    anchored, _ = robolab_server._standard_eef_delta_to_abs_eef_pose(
+        delta,
+        np.zeros(3, dtype=np.float32),
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        pose_convention="backward_anchored",
+    )
+    framewise, _ = robolab_server._standard_eef_delta_to_abs_eef_pose(
+        delta,
+        np.zeros(3, dtype=np.float32),
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        pose_convention="backward_framewise",
+    )
+
+    np.testing.assert_allclose(anchored, [[0.1, 0.0, 0.0], [0.0, 0.1, 0.0]], atol=1e-6)
+    assert not np.allclose(anchored, framewise)
 
 
 def test_build_data_batch_wraps_multi_item_keys_like_internal_server() -> None:

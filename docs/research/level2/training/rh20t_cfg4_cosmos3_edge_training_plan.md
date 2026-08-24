@@ -44,21 +44,14 @@ executed horizon         = 8
 
 ## 3. 为什么选择chunk 16
 
-官方 Cosmos3 DROID policy 使用15 Hz、chunk 32，对应约2.13秒。RH20T经过3 mm SE(3)+夹爪+wrench事件清洗后，有效平均密度约6 Hz：
-
-| Chunk | 清洗轨迹真实跨度中位数 | P5–P95 |
-|---:|---:|---:|
-| 8 | 1.18秒 | 0.84–1.83秒 |
-| 12 | 1.78秒 | 1.27–2.65秒 |
-| 16 | 2.38秒 | 1.71–3.44秒 |
-| 32 | 4.83秒 | 3.51–6.46秒 |
+官方 Cosmos3 DROID policy 使用15 Hz、chunk 32，对应约2.13秒。RH20T 清洗后的有效频率和各 chunk 真实跨度由正式 dry-run 重新统计。
 
 因此：
 
-- 32步在清洗数据上open-loop过长。
-- 16步最接近官方DROID约2秒的语义。
+- 32步可能在清洗数据上形成过长 open-loop。
+- chunk 16 暂作首选，正式跨度统计完成后冻结。
 - 当前 Edge-LIBERO 模型配置已包含 `encode_exact_durations=[17,61,73]`，16步对应17帧，无需新增tokenizer duration。
-- 执行8步时，后台推理预算中位约1.18秒；P5约0.84秒，可作为4070 Ti端到端延迟目标的依据。
+- 执行 8 步的推理预算以正式跨度统计和 4070 Ti 实测为准。
 
 ## 4. 计划代码改动
 
@@ -175,8 +168,7 @@ grad_accum_iter in {1, 2, 4}
 1. `ext2` vs `ext2_wrist`。
 2. nominal fps 6、真实时间窗anchor方案。
 3. chunk 12 vs 16。
-4. wrench只做保留事件 vs 同时作为observation输入。
-5. denoise steps 4/6/8，仅在同一checkpoint上做推理消融。
+4. denoise steps 4/6/8，仅在同一checkpoint上做推理消融。
 
 不要同时改变数据清洗、相机、chunk和denoise steps，否则无法定位收益来源。
 

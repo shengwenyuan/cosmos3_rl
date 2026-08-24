@@ -21,6 +21,16 @@ from cosmos_framework.utils.lazy_config import LazyDict
 
 cs = ConfigStore.instance()
 
+_EEF_LAYOUT = (
+    "delta_x", "delta_y", "delta_z",
+    "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5",
+    "gripper",
+)
+_DROID_VIEW_DESCRIPTION = (
+    "The top row is from the wrist-mounted camera. The bottom row contains two horizontally concatenated "
+    "third-person perspective views of the scene from opposite sides, with the robot visible."
+)
+
 
 def _droid_eef_edge_model_config() -> dict:
     cfg = copy.deepcopy(EDGE_MODEL_CONFIG)
@@ -56,6 +66,83 @@ action_policy_droid_eef_edge = LazyDict(
             wandb_mode="disabled",
         ),
         model=dict(config=_droid_eef_edge_model_config()),
+        requires_action_policy_manifest=True,
+        action_policy=dict(
+            schema_version=1,
+            profile_id="droid_eef_stage1_15hz_c32",
+            robot="droid",
+            domain_name="droid_lerobot",
+            policy_fps=15,
+            chunk_size=32,
+            model_action=dict(
+                codec="eef_delta",
+                layout=_EEF_LAYOUT,
+                representation="delta",
+                frame="droid_eef",
+                pose_convention="backward_anchored",
+                gripper=dict(index=9, semantics="open_fraction"),
+            ),
+            wire_action=dict(
+                codec="eef_absolute",
+                layout=("x", "y", "z", "qx", "qy", "qz", "qw", "gripper"),
+                representation="absolute",
+                frame="droid_eef",
+                quaternion_order="xyzw",
+                gripper=dict(index=7, semantics="close_fraction"),
+            ),
+            conditioning=dict(
+                state_rows=0,
+                history_rows=0,
+                source="none",
+                timing="32 future poses are encoded as SE(3) deltas anchored at the current EEF pose",
+            ),
+            decoder_anchor=dict(kind="current_eef_pose", frame="droid_eef", quaternion_order="xyzw"),
+            observation=dict(
+                layout_id="primary_top_aux_bottom_pair",
+                view_shape_hw=(360, 640),
+                canvas_shape_hw=(540, 640),
+                view_roles=("primary", "aux_left", "aux_right"),
+                missing_view_policy="error",
+                viewpoint="concat_view",
+                description="The wrist view is above the two exterior views.",
+            ),
+            transform=dict(
+                resolution="480",
+                max_action_dim=64,
+                action_channel_masking=True,
+                append_viewpoint_info=True,
+                append_duration_fps_timestamps=True,
+                append_resolution_info=True,
+                append_idle_frames=False,
+                format_prompt_as_json=True,
+            ),
+            normalization=dict(
+                kind="quantile_rot",
+                stats_file="artifacts/fx4_droid_franka_eef_c32_v2_quantile_rot.json",
+                sha256="1965bc2a279ef9b7c82330f1102681d2d74a566ce655f5f1449a27647a6fec9a",
+                apply_forward_clamp=False,
+            ),
+            datasets=(
+                dict(
+                    name="cosmos3_droid_success_640x360_v1",
+                    root="${oc.env:DROID_ROOT}",
+                    condition_source="none",
+                    action_features=("observation.state.cartesian_position", "action.gripper_position"),
+                    camera_features=dict(
+                        primary="observation.image.wrist_image_left",
+                        aux_left="observation.image.exterior_image_1_left",
+                        aux_right="observation.image.exterior_image_2_left",
+                    ),
+                    action_layout=_EEF_LAYOUT,
+                    gripper_semantics="close_fraction",
+                    source_frame="droid_eef",
+                    source_gripper_index=9,
+                    source_target_offset=1,
+                    description="DROID success trajectories filtered by Fx4 and resampled at 15 Hz.",
+                    view_description=_DROID_VIEW_DESCRIPTION,
+                ),
+            ),
+        ),
         optimizer=dict(
             betas=[0.9, 0.99],
             eps=1.0e-08,

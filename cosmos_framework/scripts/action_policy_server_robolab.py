@@ -29,6 +29,7 @@ from cosmos_framework.inference.common.init import init_script
 
 init_script()
 
+import hashlib
 import json
 import os
 import socket
@@ -50,11 +51,11 @@ from cosmos_framework.data.generator.action.policy_schema import (
     find_action_policy_manifest,
     load_action_policy_manifest,
 )
+from cosmos_framework.data.generator.action.utils.action_processing import load_action_normalizer
 from cosmos_framework.data.generator.action.utils.domain_utils import get_domain_id
 from cosmos_framework.data.generator.action.utils.pose_utils import (
     build_abs_pose_from_components,
     convert_rotation,
-    pose_abs_to_rel,
     pose_rel_to_abs,
 )
 from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
@@ -126,6 +127,24 @@ def _resolve_policy_manifest(
         "No action-policy manifest found for this checkpoint. Pass --policy-config PATH or place the canonical "
         "action_policy.yaml at the run/export root; server-side dataset guessing has been removed."
     )
+
+
+def _policy_manifest_origin(
+    checkpoint_path: str,
+    *,
+    requested_checkpoint: str,
+    policy_config: Path | None,
+) -> Path:
+    """Return the manifest file that owns artifact-relative sidecars."""
+
+    discovered = find_action_policy_manifest(checkpoint_path)
+    if discovered is not None:
+        return discovered
+    if policy_config is not None:
+        return policy_config.expanduser().absolute()
+    if requested_checkpoint in _ROBOLAB_POLICY_HF_REPOSITORIES:
+        return _BUILTIN_DROID_MANIFEST
+    raise ValueError("Cannot resolve action-policy manifest origin")
 
 
 def _validate_checkpoint(checkpoint_path: str, *, allow_dcp_checkpoint: bool) -> None:
@@ -214,12 +233,14 @@ def _standard_eef_delta_to_abs_eef_pose(
     pose_delta: np.ndarray,
     initial_pos: np.ndarray,
     initial_quat_xyzw: np.ndarray,
+    *,
+    pose_convention: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Decode standard SE(3) delta actions into absolute EEF poses.
 
     The model output is the Cosmos action-manifold representation
     ``[translation_delta(3), rot6d_delta(6)]`` using the shared
-    ``backward_framewise`` convention. The returned pose sequence drops the
+    manifest-declared pose convention. The returned pose sequence drops the
     initial conditioning pose and aligns one absolute target with each predicted
     delta row.
     """
@@ -236,7 +257,7 @@ def _standard_eef_delta_to_abs_eef_pose(
     poses_abs = pose_rel_to_abs(
         pose_delta,
         rotation_format="rot6d",
-        pose_convention="backward_framewise",
+        pose_convention=pose_convention,
         initial_pose=initial_pose,
         normalize_rotation=True,
     )
@@ -415,6 +436,11 @@ class RobolabPolicyService:
             requested_checkpoint=requested_checkpoint,
             policy_config=args.policy_config,
         )
+        manifest_path = _policy_manifest_origin(
+            resolved_checkpoint_path,
+            requested_checkpoint=requested_checkpoint,
+            policy_config=args.policy_config,
+        )
         dataset_source = manifest.resolve_dataset_source(args.dataset_source)
         args = args.model_copy(update={"checkpoint_path": resolved_checkpoint_path})
         _validate_checkpoint(args.checkpoint_path, allow_dcp_checkpoint=args.allow_dcp_checkpoint)
@@ -445,6 +471,7 @@ class RobolabPolicyService:
             num_steps=int(args.num_steps),
             shift=float(args.shift),
         )
+        self._action_normalizer = self._load_action_normalizer(manifest, manifest_path)
         self._transform = self._build_transform(manifest)
 
         self._lock = threading.Lock()
@@ -507,6 +534,26 @@ class RobolabPolicyService:
             format_prompt_as_json=transform.format_prompt_as_json,
         )
 
+    def _load_action_normalizer(self, manifest: ActionPolicyManifest, manifest_path: Path):
+        binding = manifest.normalization
+        if binding.kind == "none":
+            return None
+        stats_path = manifest_path.parent / binding.stats_file
+        if not stats_path.is_file():
+            raise FileNotFoundError(f"Action normalization stats not found: {stats_path}")
+        digest = hashlib.sha256(stats_path.read_bytes()).hexdigest()
+        if digest != binding.sha256:
+            raise ValueError(
+                f"Action normalization stats hash mismatch: expected={binding.sha256}, actual={digest}"
+            )
+        return load_action_normalizer(
+            binding.kind,
+            stats_path=stats_path,
+            stats_key=binding.stats_key,
+            expected_dim=manifest.model_action_dim,
+            apply_forward_clamp=binding.apply_forward_clamp,
+        )
+
     def _next_seed(self) -> int:
         if self.cfg.deterministic_seed:
             return self.cfg.seed
@@ -562,21 +609,10 @@ class RobolabPolicyService:
                 history_action = torch.from_numpy(history_np).float()  # [H,D]
 
         elif self.cfg.action_space == "eef_delta":
-            eef_pos = _ensure_2d_float_array(obs["observation/eef_pos"], "observation/eef_pos", 3)
-            eef_quat = _ensure_2d_float_array(obs["observation/eef_quat"], "observation/eef_quat", 4)
-            if self.cfg.use_state:
-                rot6d = convert_rotation(eef_quat[-1], "quat_xyzw", "rot6d")
-                action[0] = torch.from_numpy(np.concatenate((eef_pos[-1], rot6d, gripper_position[-1])))  # [D]
-            if num_history_rows > 0:
-                if len(eef_pos) < num_history_rows + 1 or len(eef_quat) < num_history_rows + 1:
-                    raise ValueError("Not enough eef_pos/eef_quat rows for requested history_length")
-                poses_abs = build_abs_pose_from_components(eef_pos, eef_quat, "quat_xyzw")
-                poses_rel = pose_abs_to_rel(poses_abs, rotation_format="rot6d", pose_convention="backward_framewise")
-                history_np = np.concatenate(
-                    [poses_rel[-num_history_rows:], gripper_position[-num_history_rows:]],
-                    axis=-1,
-                )
-                history_action = torch.from_numpy(history_np).float()  # [H,D]
+            # Stateless EEF policies use the current pose only as a decoder
+            # anchor after generation; it is never packed as a model state row.
+            if self.cfg.use_state or num_history_rows:
+                raise ValueError("EEF delta serving requires stateless conditioning")
         else:
             raise ValueError(f"Unsupported model action codec {self.cfg.action_space!r}")
 
@@ -592,7 +628,7 @@ class RobolabPolicyService:
         }
         if history_action is not None:
             sample["history_action"] = history_action
-        sample = self._transform(sample, self.cfg.resolution, action_normalizer=None)
+        sample = self._transform(sample, self.cfg.resolution, action_normalizer=self._action_normalizer)
         if isinstance(sample.get("ai_caption"), dict):
             sample["ai_caption"] = json.dumps(sample["ai_caption"])
         return sample
@@ -647,12 +683,12 @@ class RobolabPolicyService:
         )
 
         if self.cfg.action_space == "eef_delta":
-            eef_pos = _ensure_2d_float_array(obs["observation/eef_pos"], "observation/eef_pos", 3)
-            eef_quat = _ensure_2d_float_array(obs["observation/eef_quat"], "observation/eef_quat", 4)
+            eef_pose = _ensure_2d_float_array(obs["observation/eef_pose"], "observation/eef_pose", 7)
             position, quat_xyzw = _standard_eef_delta_to_abs_eef_pose(
                 action_np[:, :9],
-                eef_pos[-1],
-                eef_quat[-1],
+                eef_pose[-1, :3],
+                eef_pose[-1, 3:7],
+                pose_convention=self.cfg.manifest.model_action.pose_convention,
             )
             gripper = action_np[:, model_gripper_index : model_gripper_index + 1]
             action_np = np.concatenate([position, quat_xyzw, gripper], axis=-1)

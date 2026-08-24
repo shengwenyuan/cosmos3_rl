@@ -41,8 +41,8 @@ task_id,instruction_en,instruction_zh,review_status,source
 清洗后是可变时间间隔的空间序列。LeRobot/Cosmos 当前接口仍需要单一 `fps`，首版采用：
 
 ```text
-nominal_fps = 6
-timestamp = cleaned_index / 6.0
+nominal_fps = round(1 / median(source.delta_t_s))
+timestamp = cleaned_index / nominal_fps
 ```
 
 同时额外保存：
@@ -53,7 +53,7 @@ source.delta_t_s
 source.timestamp_ms
 ```
 
-名义时间只用于 LeRobot 索引和 Cosmos prompt；真机执行与离线分析必须优先使用 source timestamp。禁止丢弃原时间戳后再把数据解释为严格6 Hz轨迹。
+名义时间只用于 LeRobot 索引和 Cosmos prompt；真机执行与离线分析必须优先使用 source timestamp。禁止丢弃原时间戳后再把数据解释为严格固定频率轨迹。
 
 ### 2.3 Action表示
 
@@ -80,10 +80,7 @@ rotation_format = "rot6d"
 ```text
 observation.state.eef_abs = xyz + rot6d
 observation.state.gripper = 1D
-observation.state.wrench  = force_xyz + torque_xyz
 ```
-
-力数据先作为观察/审计字段保存，首版模型输入是否使用另行做消融，不直接拼入 action。
 
 ### 2.4 图像变体
 
@@ -122,7 +119,7 @@ observation.images.wrist
 - 原始有效视频分辨率为640×360。
 - LeRobot落盘保留640×360 H.264，避免提前损失信息。
 - Cosmos dataloader阶段再执行训练分辨率缩放。
-- 视频时间基必须与名义6 Hz一致；source timestamp写入parquet辅助字段。
+- 视频时间基必须与冻结的名义 fps 一致；source timestamp 写入 parquet 辅助字段。
 - 转码必须记录 ffmpeg 命令、版本、codec、pixel format、GOP和帧数。
 
 ## 3. 目标LeRobot结构
@@ -151,7 +148,6 @@ episode_index, frame_index, index, timestamp, task_index
 action[10]
 observation.state.eef_abs[9]
 observation.state.gripper[1]
-observation.state.wrench[6]
 source.timestamp_s
 source.delta_t_s
 source.keep_reason
@@ -290,5 +286,4 @@ cosmos_framework/data/generator/action/utils/domain_utils.py
 ## 9. 未决策项
 
 - `ext2` 与 `ext2_wrist` 哪个作为主训练集，需要用100条smoke比较有效window数量、视觉覆盖和显存。
-- 是否把wrench作为模型输入，首版默认仅保存不输入。
-- 6 Hz是名义值；若模型对时间提示敏感，需要增加真实 `delta_t` conditioning或改为“空间索引选anchor、window内固定时间重采样”的对照数据集。
+- 名义 fps 由清洗结果冻结；若模型对时间提示敏感，需要增加真实 `delta_t` conditioning 或改为“空间索引选 anchor、window 内固定时间重采样”的对照数据集。

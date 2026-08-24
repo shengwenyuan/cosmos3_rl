@@ -60,6 +60,7 @@ codec          = "eef_delta"
 layout         = ["delta_x", "delta_y", "delta_z", "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5", "gripper"]
 representation = "delta"
 frame          = "berkeley_tcp"
+pose_convention = "backward_framewise"
 
 [action_policy.model_action.gripper]
 index     = 9
@@ -81,6 +82,11 @@ state_rows   = 0
 history_rows = 0
 source       = "none"
 timing       = "32 frame-wise SE(3) deltas map observation t0..t31 to t1..t32; no action state row is prepended"
+
+[action_policy.decoder_anchor]
+kind             = "current_eef_pose"
+frame            = "berkeley_tcp"
+quaternion_order = "xyzw"
 
 [action_policy.observation]
 layout_id           = "primary_top_aux_bottom_pair_right_missing"

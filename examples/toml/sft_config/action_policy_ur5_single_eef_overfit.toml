@@ -64,6 +64,7 @@ codec          = "eef_delta"
 layout         = ["delta_x", "delta_y", "delta_z", "rot6d_0", "rot6d_1", "rot6d_2", "rot6d_3", "rot6d_4", "rot6d_5", "gripper"]
 representation = "delta"
 frame          = "tool0"
+pose_convention = "backward_framewise"
 
 [action_policy.model_action.gripper]
 index     = 9
@@ -85,6 +86,11 @@ state_rows   = 0
 history_rows = 0
 source       = "none"
 timing       = "pose rows t0..t32 produce 32 frame-wise SE(3) deltas; gripper targets are action rows t1..t32"
+
+[action_policy.decoder_anchor]
+kind             = "current_eef_pose"
+frame            = "tool0"
+quaternion_order = "xyzw"
 
 [action_policy.observation]
 layout_id           = "primary_top_aux_bottom_pair"

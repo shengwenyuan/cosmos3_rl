@@ -11,7 +11,9 @@ the derived wire contract advertised during the WebSocket handshake.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import shutil
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any, Literal
@@ -21,6 +23,7 @@ import tomllib
 import yaml
 
 GripperSemantics = Literal["close_fraction", "open_fraction"]
+PoseConvention = Literal["backward_framewise", "backward_anchored"]
 EEF_DELTA_LAYOUT = (
     "delta_x",
     "delta_y",
@@ -56,6 +59,7 @@ class ActionRepresentation(_StrictModel):
     gripper: GripperSpec
     frame: str | None = None
     quaternion_order: Literal["xyzw", "wxyz"] | None = None
+    pose_convention: PoseConvention | None = None
 
     @pydantic.model_validator(mode="after")
     def _validate_layout(self) -> "ActionRepresentation":
@@ -83,6 +87,8 @@ class ActionRepresentation(_StrictModel):
             raise ValueError("absolute EEF wire actions require quaternion_order")
         if self.codec == "eef_absolute" and self.quaternion_order != "xyzw":
             raise ValueError("action-policy schema v1 supports only quaternion_order='xyzw'")
+        if (self.codec == "eef_delta") != (self.pose_convention is not None):
+            raise ValueError("pose_convention is required exactly for eef_delta model actions")
         return self
 
 
@@ -102,6 +108,20 @@ class ConditioningSpec(_StrictModel):
             raise ValueError("source must be 'none' exactly when state_rows is 0")
         if not self.timing.strip():
             raise ValueError("conditioning timing description must not be empty")
+        return self
+
+
+class DecoderAnchorSpec(_StrictModel):
+    """Observation pose used only to decode stateless model deltas."""
+
+    kind: Literal["current_eef_pose"]
+    frame: str
+    quaternion_order: Literal["xyzw"] = "xyzw"
+
+    @pydantic.model_validator(mode="after")
+    def _validate_anchor(self) -> "DecoderAnchorSpec":
+        if not self.frame.strip():
+            raise ValueError("decoder_anchor.frame must be non-empty")
         return self
 
 
@@ -146,14 +166,37 @@ class TransformSpec(_StrictModel):
 
 
 class NormalizationSpec(_StrictModel):
-    """Action normalization supported by manifest schema v1.
+    """Artifact-relative, content-addressed action normalization binding."""
 
-    Affine policies need an exact, source-aware stats binding in both training
-    and serving. Schema v1 rejects them instead of pretending a YAML copy is
-    authoritative while the dataset loads different mutable statistics.
-    """
+    kind: Literal[
+        "none",
+        "quantile",
+        "quantile_rot",
+        "quantile_rot_scale_floor",
+        "meanstd",
+        "minmax",
+        "asinh_rot",
+        "piecewise_asinh_rot",
+    ] = "none"
+    stats_file: str | None = None
+    sha256: str | None = None
+    stats_key: str | None = None
+    apply_forward_clamp: bool = False
 
-    kind: Literal["none"] = "none"
+    @pydantic.model_validator(mode="after")
+    def _validate_binding(self) -> "NormalizationSpec":
+        if self.kind == "none":
+            if self.stats_file is not None or self.sha256 is not None or self.stats_key is not None:
+                raise ValueError("normalization kind='none' must not bind stats")
+            return self
+        if self.stats_file is None or self.sha256 is None:
+            raise ValueError("normalized policies require stats_file and sha256")
+        path = Path(self.stats_file)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("normalization.stats_file must be an artifact-relative path")
+        if len(self.sha256) != 64 or any(char not in "0123456789abcdef" for char in self.sha256):
+            raise ValueError("normalization.sha256 must be 64 lowercase hexadecimal characters")
+        return self
 
 
 class DatasetSourceDescription(_StrictModel):
@@ -211,6 +254,7 @@ class ActionPolicyManifest(_StrictModel):
     model_action: ActionRepresentation
     wire_action: ActionRepresentation
     conditioning: ConditioningSpec
+    decoder_anchor: DecoderAnchorSpec | None = None
     observation: ObservationSpec
     transform: TransformSpec
     normalization: NormalizationSpec = pydantic.Field(default_factory=NormalizationSpec)
@@ -255,6 +299,13 @@ class ActionPolicyManifest(_StrictModel):
             raise ValueError("schema v1 EEF policies require 0/0 no-state conditioning")
         if self.model_action.codec == "eef_delta" and self.model_action.frame != self.wire_action.frame:
             raise ValueError("EEF model and wire frames must match; schema v1 does not perform frame transforms")
+        if self.model_action.codec == "eef_delta":
+            if self.decoder_anchor is None:
+                raise ValueError("EEF delta policies require decoder_anchor")
+            if self.decoder_anchor.frame != self.model_action.frame:
+                raise ValueError("decoder_anchor.frame must match the EEF model/wire frame")
+        elif self.decoder_anchor is not None:
+            raise ValueError("decoder_anchor is only valid for EEF delta policies")
         if self.model_action.codec not in {"joint_position", "eef_delta"}:
             raise ValueError(f"unsupported model action codec for schema v1: {self.model_action.codec!r}")
         for source in self.datasets:
@@ -315,6 +366,9 @@ class ActionPolicyManifest(_StrictModel):
                 "history_rows": self.conditioning.history_rows,
                 "source": self.conditioning.source,
             },
+            "decoder_anchor": (
+                self.decoder_anchor.model_dump(mode="json") if self.decoder_anchor is not None else None
+            ),
             "observation": {
                 "layout_id": self.observation.layout_id,
                 "view_shape_hw": list(self.observation.view_shape_hw),
@@ -449,14 +503,18 @@ def validate_training_manifest_alignment(config: Any, manifest: ActionPolicyMani
             raise ValueError(f"action_policy.{field}={expected!r} does not match resolved dataset value {actual!r}")
 
     action_normalization = _config_value(dataset, "action_normalization")
-    if manifest.normalization.kind == "none" and action_normalization is not None:
-        raise ValueError("manifest normalization is none but the resolved dataset enables action normalization")
+    expected_normalization = None if manifest.normalization.kind == "none" else manifest.normalization.kind
+    if action_normalization != expected_normalization:
+        raise ValueError(
+            f"action_policy.normalization.kind={manifest.normalization.kind!r} does not match "
+            f"resolved dataset action_normalization={action_normalization!r}"
+        )
 
     mode = _config_value(dataset, "mode", _CONFIG_MISSING)
     if mode is _CONFIG_MISSING:
         raise ValueError("resolved action dataset factory does not expose manifest-bound field 'mode'")
-    if mode != "policy":
-        raise ValueError(f"action-policy training requires dataset mode='policy', got {mode!r}")
+    if mode != "wam":
+        raise ValueError(f"action-policy training requires dataset mode='wam', got {mode!r}")
     viewpoint = _config_value(dataset, "viewpoint", _CONFIG_MISSING)
     if viewpoint is _CONFIG_MISSING:
         raise ValueError("resolved action dataset factory does not expose manifest-bound field 'viewpoint'")
@@ -567,9 +625,9 @@ def bind_manifest_to_training_config(config: Any, manifest: ActionPolicyManifest
         {
             "fps": float(manifest.policy_fps),
             "chunk_length": manifest.chunk_size,
-            "mode": "policy",
+            "mode": "wam",
             "viewpoint": manifest.observation.viewpoint,
-            "action_normalization": None,
+            "action_normalization": None if manifest.normalization.kind == "none" else manifest.normalization.kind,
             "resolution": manifest.transform.resolution,
             "max_action_dim": manifest.transform.max_action_dim,
             "action_channel_masking": manifest.transform.action_channel_masking,
@@ -694,6 +752,24 @@ def persist_run_action_policy(
             "[job].name/output directory."
         )
 
+    if manifest.normalization.kind != "none":
+        dataset = _find_rank_partitioned_action_config(config)
+        stats_value = _config_value(dataset, "action_stats_path")
+        if not stats_value:
+            raise ValueError("Normalized action-policy training requires dataset action_stats_path")
+        source_path = Path(stats_value).expanduser()
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Action normalization stats not found: {source_path}")
+        digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if digest != manifest.normalization.sha256:
+            raise ValueError(
+                f"Action normalization stats hash mismatch: expected={manifest.normalization.sha256}, actual={digest}"
+            )
+        target_path = run_dir / manifest.normalization.stats_file
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if source_path.resolve() != target_path.resolve():
+            shutil.copyfile(source_path, target_path)
+
     # This is the only canonical owner for the run. Checkpoint paths discover
     # it by walking to the run; config.yaml may retain an audit snapshot but is
     # never used as serving/resume semantics.
@@ -705,6 +781,7 @@ __all__ = [
     "ActionPolicyManifest",
     "ActionRepresentation",
     "ConditioningSpec",
+    "DecoderAnchorSpec",
     "DatasetSourceDescription",
     "GripperSemantics",
     "GripperSpec",
