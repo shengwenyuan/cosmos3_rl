@@ -5,6 +5,8 @@
 训练资源：8 GPU 云端开发机
 目标部署：约 RTX 4070 Ti 级别单卡主机
 
+修订提示（2026-08-25）：本文件保留 RH20T 数据、部署和安全细节；初始化、GBS、action 主线和 Stage 2 定位已由 `stage1_stage2_reframing_after_droid_eef_v1.md` 重构。冲突处以后者为准。
+
 ## 1. 目标
 
 基于清洗并转换完成的 RH20T CFG4 LeRobot 数据，对 Cosmos3-Edge 进行 WAM/action-policy 后训练，输出可在单卡真机端运行的 EEF 相对动作策略。

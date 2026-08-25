@@ -5,6 +5,8 @@
 > 范围：第二学期 Level 2 主线与 Level 3 衔接
 > 原则：先冻结主链；消融实验单独登记，按资源优先级补充。
 
+> 2026-08-25 amendment：Stage 1 v1 失败后，Stage 1 降级为机制验证，Stage 2 改为 RH20T/UR5 Vision SFT→stateful joint 主线；详见 `../level2/training/stage1_stage2_reframing_after_droid_eef_v1.md`。与本文冻结主链冲突处以 amendment 为准。
+
 ## 0. 结论与冻结决策
 
 主训练链冻结为：
@@ -259,6 +261,16 @@ state: none in v1
 data manifest + stats + filter report
 closed-loop/action probe report
 ```
+
+### 4.5 2026-08-24 实施状态
+
+Stage 1 v1 已完成数据、训练、checkpoint、server-client 与 RoboLab 链路，但行为 gate 未通过。实际训练 action 为：
+
+```text
+delta[k] = inverse(T0) @ Tk,  k = 1..32
+```
+
+即 anchored cumulative delta，而不是本计划 2.1 节定义的 frame-wise delta。该差异与失败结果均不得在 Stage 2 中静默继承。Stage 1 v1 checkpoint 只可作为受控初始化消融；Stage 2 主实验必须保留 `Edge MT → UR5-EEF` 直接初始化对照。详见 `../level2/training/droid_eef_stage1_validation_report.md`。
 
 ## 5. Stage 2：DROID-EEF → UR5-EEF
 

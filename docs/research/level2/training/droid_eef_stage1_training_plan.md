@@ -2,6 +2,8 @@
 
 日期：2026-08-21
 
+执行状态（2026-08-24）：训练与部署链路已跑通，但策略行为门禁未通过。实测记录见 `droid_eef_stage1_validation_report.md`。本文件保留为 v1 历史计划；2026-08-25 后的重训决策以 `stage1_stage2_reframing_after_droid_eef_v1.md` 为准。
+
 ## 1. 目标与边界
 
 目标是在 Cosmos3-Edge MT 基座上学习跨机器人 EEF 动作先验，为 RH20T cfg4 和 UR12e 迁移提供 Level 2 起点。Nano Policy DROID 是数据口径参考，不直接继承其 joint-space action head。
@@ -10,13 +12,19 @@
 
 ## 2. 标签语义先审计
 
-当前 DROID loader 的 `ee_pose_delta` 使用未来帧 `observation.state.cartesian_position` 计算相对当前帧的 SE(3) 增量，再编码为：
+本轮实际 DROID loader 的 `ee_pose_delta` 使用 window 起点 `T0` 与未来帧 `Tk` 计算 anchored SE(3) 增量：
+
+```text
+delta[k] = inverse(T0) @ Tk,  k = 1..32
+```
+
+再编码为：
 
 ```text
 [dx, dy, dz, rot6d(6), gripper_open_fraction]  # 10D
 ```
 
-这本质上是“未来实测 EEF 轨迹代理”，不是数据里的 Cartesian command。第一轮可沿用以最小化代码改动，但开训前必须抽样比较 measured pose 与 `action.cartesian_position` 的时延、跳变和夹爪对齐；若改用 command，需作为新数据版本，不能静默切换。
+这本质上是“未来实测 EEF 轨迹代理”，不是数据里的 Cartesian command；也是相对同一 `T0` 的累计目标，不是 `inverse(T[k-1]) @ T[k]` 的逐帧增量。若改用 command 或逐帧增量，必须建立新数据版本、统计量和实验，不能静默切换。
 
 ## 3. 第一轮配置
 
@@ -24,7 +32,7 @@
 |---|---|---|
 | base checkpoint | 官方 Cosmos3-Edge MT | 不加载 Nano joint action head |
 | dataset profile | `cosmos3_droid_success_640x360_v1` | 显式指定，禁用 legacy 自动探测 |
-| action space | `ee_pose_delta` | backward-framewise、relative-to-current |
+| action space | `ee_pose_delta` | backward-anchored、relative-to-window-start |
 | action dim | 10 | xyz + rot6d + gripper |
 | state | `use_state=false` | 保持跨机器人接口 |
 | FPS | 15 | 首轮不重采样 |
@@ -96,4 +104,4 @@ chunk 16 只作为后续 RH20T/UR12e 备选：若 3 mm 重采样后 episode 明�
 - 离线：按任务族报告 delta L1、旋转 geodesic error、gripper F1、32-step rollout drift，并单独报告前 8 步误差。
 - 部署前：目标 4070 Ti 级主机测 4/8 denoise steps 的 P50/P95 推理时延；验证 32 预测/8 执行没有明显停顿。
 
-只有 P3 离线门禁通过，才进入 RH20T cfg4；只有坐标、归一化和 action 解码一致性通过，才允许进入 Level 3 真机阶段。
+本轮 P3 离线与 RoboLab 行为门禁未通过，因此 Stage 1 不记为成功基线。RH20T cfg4 只允许进入受控 Stage 2 pilot，并必须同时保留 Edge MT 直接初始化对照；只有坐标、归一化、action 解码及小集过拟合门禁通过，才允许扩大训练，更不能直接进入 Level 3 真机阶段。

@@ -9,6 +9,8 @@
 ## 训练
 
 - `training/droid_eef_stage1_training_plan.md`：第一轮 DROID EEF 训练展开。
+- `training/droid_eef_stage1_validation_report.md`：Stage 1 实际训练、离线分布和 RoboLab 验证结论。
+- `training/stage1_stage2_reframing_after_droid_eef_v1.md`：结合 Stage 1 失败与 BEHAVIOR1K Action SFT 参考后的新主线。
 - `training/rh20t_cfg4_cosmos3_edge_training_plan.md`：RH20T cfg4 Edge 训练。
 
 所有数据选择必须输出不可变 manifest；统计量只用 train split 计算，不能在加载器内放置不可追踪的临时筛选。
