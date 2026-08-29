@@ -26,6 +26,7 @@ from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
 )
 from cosmos_framework.data.generator.action.datasets.canvas_utils import (
     concat_three_view_canvas,
+    concat_vertical_pair_canvas,
     resize_view,
     zero_like_view,
 )
@@ -38,6 +39,7 @@ from cosmos_framework.data.generator.action.utils.transforms import ActionTransf
 
 ConditionSource = Literal["action_t0", "observation_state_t0"]
 GripperSemantics = Literal["close_fraction", "open_fraction"]
+CanvasLayout = Literal["primary_top_aux_bottom_pair", "vertical_pair"]
 
 _ACTION_DIM = 7
 _JOINT_DIM = 6
@@ -57,6 +59,8 @@ class UR5SingleSourceSpec:
     action_layout: tuple[str, ...]
     gripper_semantics: GripperSemantics
     view_description: str
+    canvas_layout: CanvasLayout = "primary_top_aux_bottom_pair"
+    episode_indices: tuple[int, ...] | None = None
     joint_state_feature: str | None = None
     gripper_state_feature: str | None = None
     tolerance_s: float = 2e-4
@@ -67,7 +71,7 @@ def _normalize_source(source: UR5SingleSourceSpec | Mapping[str, Any]) -> UR5Sin
     if isinstance(source, UR5SingleSourceSpec):
         return source
     values = dict(source)
-    for key in ("action_layout", "decode_size_hw"):
+    for key in ("action_layout", "decode_size_hw", "episode_indices"):
         if values.get(key) is not None:
             values[key] = tuple(values[key])
     if values.get("camera_features") is not None:
@@ -106,6 +110,14 @@ def _validate_source(meta: LeRobotDatasetMetadata, source: UR5SingleSourceSpec, 
         raise ValueError(
             "camera_features must map 'primary' and optional 'aux_left'/'aux_right' roles to feature names"
         )
+    expected_roles = {
+        "primary_top_aux_bottom_pair": frozenset(("primary", "aux_left", "aux_right")),
+        "vertical_pair": frozenset(("primary", "aux_left")),
+    }.get(source.canvas_layout)
+    if expected_roles is None:
+        raise ValueError(f"Unsupported UR5 canvas_layout={source.canvas_layout!r}.")
+    if source.canvas_layout == "vertical_pair" and roles != expected_roles:
+        raise ValueError("vertical_pair requires exactly the primary and aux_left camera roles")
     if not source.name.strip() or not source.view_description.strip():
         raise ValueError("UR5-single source name and view_description must not be empty.")
     if len(source.action_layout) != _ACTION_DIM:
@@ -209,6 +221,7 @@ class UR5SingleLeRobotDataset(BaseActionLeRobotDataset):
         sources: Sequence[UR5SingleSourceSpec | Mapping[str, Any]],
         fps: float = 15.0,
         chunk_length: int = 32,
+        video_subsample: int = 1,
         sample_stride: int = 1,
         split: str = "full",
         split_seed: int = 42,
@@ -216,14 +229,24 @@ class UR5SingleLeRobotDataset(BaseActionLeRobotDataset):
         mode: str = "policy",
         viewpoint: str = "concat_view",
         action_normalization: ActionNormalization | None = None,
+        action_stats_path: str | None = None,
+        apply_forward_clamp: bool = False,
         video_backend: str | None = "torchcodec",
         skip_video_loading: bool = False,
     ) -> None:
         if not sources:
             raise ValueError("UR5SingleLeRobotDataset requires at least one source.")
+        if video_subsample < 1 or chunk_length % video_subsample:
+            raise ValueError("video_subsample must be positive and divide chunk_length exactly.")
         if viewpoint != "concat_view":
             raise NotImplementedError("UR5SingleLeRobotDataset only supports concat_view.")
         self._source_specs = [_normalize_source(source) for source in sources]
+        selected = [source.episode_indices for source in self._source_specs if source.episode_indices is not None]
+        if selected and len(self._source_specs) != 1:
+            raise ValueError("episode_indices is supported only for a single explicit source.")
+        self._selected_episode_indices = frozenset(selected[0]) if selected else None
+        self._video_subsample = video_subsample
+        self._action_stats_path = Path(action_stats_path).expanduser() if action_stats_path else None
         self._source_tasks: list[dict[int, str]] = []
         super().__init__(
             fps=fps,
@@ -237,12 +260,15 @@ class UR5SingleLeRobotDataset(BaseActionLeRobotDataset):
             pose_convention="backward_framewise",
             rotation_format=None,
             action_normalization=action_normalization,
+            apply_forward_clamp=apply_forward_clamp,
             tolerance_s=max(source.tolerance_s for source in self._source_specs),
             skip_video_loading=skip_video_loading,
             sample_stride=sample_stride,
         )
 
-        observation_ts = [index / self._fps for index in range(self._chunk_length + 1)]
+        observation_ts = [
+            index / self._fps for index in range(0, self._chunk_length + 1, self._video_subsample)
+        ]
         for source in self._source_specs:
             meta = LeRobotDatasetMetadata(repo_id="local", root=source.root, revision="local")
             _validate_source(meta, source, fps=self._fps)
@@ -262,6 +288,17 @@ class UR5SingleLeRobotDataset(BaseActionLeRobotDataset):
     @property
     def action_dim(self) -> int:
         return _ACTION_DIM
+
+    def _normalizer_path(self) -> Path:
+        return self._action_stats_path or super()._normalizer_path()
+
+    def _filter_valid_episodes(self, _meta: LeRobotDatasetMetadata, episode_ids: list[int]) -> list[int]:
+        if self._selected_episode_indices is None:
+            return episode_ids
+        missing = self._selected_episode_indices.difference(episode_ids)
+        if missing:
+            raise ValueError(f"Selected episode indices are unavailable: {sorted(missing)!r}")
+        return [episode_id for episode_id in episode_ids if episode_id in self._selected_episode_indices]
 
     @property
     def source_specs(self) -> tuple[UR5SingleSourceSpec, ...]:
@@ -289,6 +326,8 @@ class UR5SingleLeRobotDataset(BaseActionLeRobotDataset):
             for role, camera in source.camera_features.items()
         }
         top = views["primary"]
+        if source.canvas_layout == "vertical_pair":
+            return concat_vertical_pair_canvas(top, views["aux_left"])
         left = views.get("aux_left", zero_like_view(top))
         right = views.get("aux_right", zero_like_view(top))
         return concat_three_view_canvas(top, left, right)
@@ -317,12 +356,15 @@ def get_action_ur5_single_sft_dataset(
     sources: Sequence[UR5SingleSourceSpec | Mapping[str, Any]],
     fps: float = 15.0,
     chunk_length: int = 32,
+    video_subsample: int = 1,
     sample_stride: int = 1,
     split: str = "full",
     split_seed: int = 42,
     split_val_ratio: float = 0.0,
     mode: str = "policy",
     action_normalization: ActionNormalization | None = None,
+    action_stats_path: str | None = None,
+    apply_forward_clamp: bool = False,
     viewpoint: str = "concat_view",
     video_backend: str | None = "torchcodec",
     resolution: str | int = "480",
@@ -344,6 +386,7 @@ def get_action_ur5_single_sft_dataset(
         sources=sources,
         fps=fps,
         chunk_length=chunk_length,
+        video_subsample=video_subsample,
         sample_stride=sample_stride,
         split=split,
         split_seed=split_seed,
@@ -351,6 +394,8 @@ def get_action_ur5_single_sft_dataset(
         mode=mode,
         viewpoint=viewpoint,
         action_normalization=action_normalization,
+        action_stats_path=action_stats_path,
+        apply_forward_clamp=apply_forward_clamp,
         video_backend=video_backend,
     )
     transform = ActionTransformPipeline(
@@ -392,8 +437,10 @@ def _bind_ur5_joint_manifest_sources(manifest: Any) -> list[dict[str, Any]]:
             raise ValueError("UR5 joint adapters require zero or two split state_features")
         if source.action_layout[:-1] != manifest.model_action.layout[:-1]:
             raise ValueError(f"dataset source {source.name!r} joint order does not match the model action layout")
-        if len(source.camera_features) < 3 and manifest.observation.missing_view_policy != "black":
-            raise ValueError(f"dataset source {source.name!r} has missing camera roles but policy is not 'black'")
+        expected_roles = set(manifest.observation.view_roles)
+        actual_roles = set(source.camera_features)
+        if manifest.observation.missing_view_policy == "error" and actual_roles != expected_roles:
+            raise ValueError(f"dataset source {source.name!r} must provide camera roles {sorted(expected_roles)!r}")
         source_configs.append(
             {
                 "root": source.root,
@@ -404,7 +451,9 @@ def _bind_ur5_joint_manifest_sources(manifest: Any) -> list[dict[str, Any]]:
                 "joint_state_feature": source.state_features[0] if source.state_features else None,
                 "gripper_state_feature": source.state_features[1] if source.state_features else None,
                 "camera_features": dict(source.camera_features),
+                "canvas_layout": manifest.observation.layout_id,
                 "action_layout": list(source.action_layout),
+                "episode_indices": list(source.episode_indices) if source.episode_indices is not None else None,
                 "gripper_semantics": source.gripper_semantics,
                 "view_description": source.view_description,
                 "decode_size_hw": list(manifest.observation.view_shape_hw),
@@ -430,7 +479,7 @@ def _validate_ur5_joint_manifest(dataset_config: Any, manifest: Any) -> None:
     for resolved, expected in zip(resolved_sources, expected_sources, strict=True):
         for key, expected_value in expected.items():
             actual = _source_value(resolved, key)
-            if key in {"action_layout", "decode_size_hw"}:
+            if key in {"action_layout", "decode_size_hw", "episode_indices"} and actual is not None:
                 actual = list(actual)
             elif key == "camera_features":
                 actual = dict(actual)

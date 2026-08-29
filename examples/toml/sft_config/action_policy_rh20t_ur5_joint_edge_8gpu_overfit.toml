@@ -1,0 +1,124 @@
+# RH20T cfg4 stateful UR5 joint policy on 8 GPUs.
+# GBS = 1 sample/rank x 8 ranks x 1 accumulation = 8.
+
+[job]
+task       = "vfm"
+experiment = "action_policy_ur5_single_joint_edge_overfit"
+project    = "cosmos3_action_rh20t_ur5_joint"
+group      = "stage2_c32"
+name       = "rh20t_ur5_joint_edge_8gpu_overfit"
+wandb_mode = "online"
+
+[model]
+precision                    = "bfloat16"
+max_num_tokens_after_packing = -1
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+context_parallel_shard_degree  = 1
+cfg_parallel_shard_degree      = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-5
+
+[scheduler]
+cycle_lengths = [500]
+f_min         = [0.1]
+warm_up_steps = [50]
+
+[trainer]
+max_iter        = 500
+logging_iter    = 10
+grad_accum_iter = 1
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100
+
+[dataloader_train]
+max_samples_per_batch = 1
+
+[dataloader_train.dataloader]
+batch_size      = 1
+num_workers     = 4
+prefetch_factor = 2
+
+# Artifact contract: 15 Hz dense joints, 32 future targets, 17 visual frames.
+[action_policy]
+schema_version = 1
+profile_id      = "rh20t_cfg4_ur5_joint_ext2_15hz_c32_overfit16_v1"
+robot           = "ur5"
+domain_name     = "ur5-single-joint"
+policy_fps      = 15
+chunk_size      = 32
+
+[action_policy.model_action]
+codec          = "joint_position"
+layout         = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint", "gripper"]
+representation = "absolute"
+
+[action_policy.model_action.gripper]
+index     = 6
+semantics = "close_fraction"
+
+[action_policy.wire_action]
+codec          = "joint_position"
+layout         = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint", "gripper"]
+representation = "absolute"
+
+[action_policy.wire_action.gripper]
+index     = 6
+semantics = "close_fraction"
+
+[action_policy.conditioning]
+state_rows   = 1
+history_rows = 1
+source       = "current_state"
+timing       = "row 0 is current measured joint/gripper state; rows 1..32 are future absolute targets"
+
+[action_policy.observation]
+layout_id           = "vertical_pair"
+view_shape_hw       = [360, 640]
+canvas_shape_hw     = [720, 640]
+view_roles          = ["primary", "aux_left"]
+video_subsample     = 2
+missing_view_policy = "error"
+viewpoint            = "concat_view"
+description          = "Exterior camera 1 is above exterior camera 2; both are real synchronized views."
+
+[action_policy.transform]
+resolution                     = "480"
+max_action_dim                 = 64
+action_channel_masking         = true
+append_viewpoint_info          = true
+append_duration_fps_timestamps = true
+append_resolution_info         = true
+append_idle_frames             = false
+format_prompt_as_json          = true
+
+[action_policy.normalization]
+kind                  = "quantile"
+stats_file            = "artifacts/rh20t_cfg4_ur5_joint_7d_quantile.json"
+sha256                 = "f5c0f076bbee8b35d640fd88b76cc812c52f7175f3cdb6423edf2bc213d8d910"
+apply_forward_clamp    = false
+
+[[action_policy.datasets]]
+name              = "rh20t_cfg4_ur5_joint_ext2_15hz_v1"
+root              = "${oc.env:RH20T_TRAIN_ROOT}"
+condition_source  = "observation_state_t0"
+action_features   = ["action"]
+state_features    = ["observation.state.joint", "observation.state.gripper"]
+camera_features   = { primary = "observation.images.exterior_1", aux_left = "observation.images.exterior_2" }
+action_layout     = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint", "gripper_close_fraction"]
+gripper_semantics = "close_fraction"
+episode_indices  = [0, 1, 10, 11, 237, 238, 484, 485, 1214, 1215, 1353, 1354, 1502, 1503, 1524, 1525]
+description       = "Accepted RH20T cfg4 UR5 segments, fixed 15 Hz, measured-joint proxy targets and command gripper."
+view_description  = "The top view is exterior camera 1. The bottom view is exterior camera 2."

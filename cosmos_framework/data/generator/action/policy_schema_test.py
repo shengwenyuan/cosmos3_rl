@@ -28,9 +28,11 @@ def _fake_action_factory(
     sources=None,
     fps=15.0,
     chunk_length=32,
+    video_subsample=1,
     mode="wam",
     viewpoint="concat_view",
     action_normalization=None,
+    apply_forward_clamp=False,
     resolution="480",
     max_action_dim=64,
     action_channel_masking=True,
@@ -71,7 +73,7 @@ def _raw_manifest() -> dict:
             "timing": "current state then 32 future targets",
         },
         "observation": {
-            "layout_id": "three_view",
+            "layout_id": "primary_top_aux_bottom_pair",
             "view_shape_hw": [360, 640],
             "canvas_shape_hw": [540, 640],
             "view_roles": ["primary", "aux_left", "aux_right"],
@@ -111,9 +113,11 @@ def _config_with_dataset(**values):
     values.setdefault("_target_", _fake_action_factory)
     values.setdefault("fps", 15.0)
     values.setdefault("chunk_length", 32)
+    values.setdefault("video_subsample", 1)
     values.setdefault("mode", "wam")
     values.setdefault("viewpoint", "concat_view")
     values.setdefault("action_normalization", None)
+    values.setdefault("apply_forward_clamp", False)
     values.setdefault("resolution", "480")
     values.setdefault("max_action_dim", 64)
     values.setdefault("action_channel_masking", True)
@@ -207,6 +211,80 @@ def test_manifest_validates_layout_and_rejects_unbound_normalization() -> None:
     raw["transform"]["append_idle_frames"] = True
     with pytest.raises(ValueError, match="unavailable during serving"):
         ActionPolicyManifest.model_validate(raw)
+
+
+def test_vertical_pair_subsample_contract_is_machine_checked() -> None:
+    raw = _raw_manifest()
+    raw["observation"].update(
+        layout_id="vertical_pair",
+        canvas_shape_hw=[720, 640],
+        view_roles=["primary", "aux_left"],
+        video_subsample=2,
+        missing_view_policy="error",
+    )
+    raw["datasets"][0]["camera_features"] = {
+        "primary": "observation.images.exterior_1",
+        "aux_left": "observation.images.exterior_2",
+    }
+    manifest = ActionPolicyManifest.model_validate(raw)
+
+    assert manifest.video_frames == 17
+    assert manifest.client_contract()["observation"]["video_subsample"] == 2
+
+    bad = manifest.model_dump(mode="json")
+    bad["observation"]["canvas_shape_hw"] = [540, 640]
+    with pytest.raises(ValueError, match="canvas_shape_hw"):
+        ActionPolicyManifest.model_validate(bad)
+
+    bad = manifest.model_dump(mode="json")
+    del bad["datasets"][0]["camera_features"]["aux_left"]
+    with pytest.raises(ValueError, match="every declared observation role"):
+        ActionPolicyManifest.model_validate(bad)
+
+    bad = manifest.model_dump(mode="json")
+    bad["observation"]["video_subsample"] = 3
+    with pytest.raises(ValueError, match="divisible"):
+        ActionPolicyManifest.model_validate(bad)
+
+
+def test_vertical_pair_binding_sets_temporal_and_source_selection() -> None:
+    raw = _raw_manifest()
+    raw["robot"] = "ur5"
+    joint_layout = ["joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "gripper"]
+    raw["model_action"]["layout"] = joint_layout
+    raw["model_action"]["gripper"]["index"] = 6
+    raw["wire_action"]["layout"] = joint_layout
+    raw["wire_action"]["gripper"]["index"] = 6
+    raw["observation"].update(
+        layout_id="vertical_pair",
+        canvas_shape_hw=[720, 640],
+        view_roles=["primary", "aux_left"],
+        video_subsample=2,
+        missing_view_policy="error",
+    )
+    raw["datasets"][0].update(
+        camera_features={
+            "primary": "observation.images.exterior_1",
+            "aux_left": "observation.images.exterior_2",
+        },
+        episode_indices=[0, 2, 7],
+        action_layout=[*joint_layout[:-1], "gripper_close_fraction"],
+    )
+    manifest = ActionPolicyManifest.model_validate(raw)
+    config = _config_with_dataset(
+        _target_=get_action_ur5_single_sft_dataset,
+        sources=[],
+        tokenizer_config=None,
+    )
+    config.model.config.tokenizer.encode_exact_durations = [17]
+
+    bind_manifest_to_training_config(config, manifest)
+    dataset = config.dataloader_train.dataloader.datasets["policy"].dataset
+
+    assert dataset.video_subsample == 2
+    assert dataset.apply_forward_clamp is False
+    assert dataset.sources[0]["canvas_layout"] == "vertical_pair"
+    assert dataset.sources[0]["episode_indices"] == [0, 2, 7]
 
 
 def test_dedicated_dataset_plumbing_is_bound_to_manifest() -> None:

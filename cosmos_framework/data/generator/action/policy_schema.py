@@ -38,6 +38,7 @@ EEF_DELTA_LAYOUT = (
 )
 EEF_ABSOLUTE_LAYOUT = ("x", "y", "z", "qx", "qy", "qz", "qw", "gripper")
 OBSERVATION_VIEW_SLOTS = ("primary", "aux_left", "aux_right")
+VERTICAL_PAIR_VIEW_SLOTS = ("primary", "aux_left")
 _CONFIG_MISSING = object()
 
 
@@ -132,6 +133,7 @@ class ObservationSpec(_StrictModel):
     view_shape_hw: tuple[int, int]
     canvas_shape_hw: tuple[int, int]
     view_roles: tuple[str, ...]
+    video_subsample: int = pydantic.Field(default=1, ge=1)
     missing_view_policy: Literal["black", "error"] = "black"
     viewpoint: str = "concat_view"
     description: str
@@ -142,11 +144,24 @@ class ObservationSpec(_StrictModel):
             raise ValueError("view_shape_hw and canvas_shape_hw values must be positive")
         if not self.layout_id.strip() or not self.view_roles:
             raise ValueError("observation layout_id and view_roles must not be empty")
-        if self.view_roles != OBSERVATION_VIEW_SLOTS:
-            raise ValueError(f"action-policy schema v1 view_roles must be positional slots {OBSERVATION_VIEW_SLOTS!r}")
         view_height, view_width = self.view_shape_hw
-        if self.canvas_shape_hw != (view_height + view_height // 2, view_width):
-            raise ValueError("schema v1 canvas_shape_hw must be one full view above two half-size views")
+        layouts = {
+            "primary_top_aux_bottom_pair": (
+                OBSERVATION_VIEW_SLOTS,
+                (view_height + view_height // 2, view_width),
+            ),
+            "vertical_pair": (VERTICAL_PAIR_VIEW_SLOTS, (2 * view_height, view_width)),
+        }
+        expected = layouts.get(self.layout_id)
+        if expected is None:
+            raise ValueError(f"unsupported action-policy observation layout_id={self.layout_id!r}")
+        expected_roles, expected_canvas = expected
+        if self.view_roles != expected_roles:
+            raise ValueError(f"layout {self.layout_id!r} requires view_roles={expected_roles!r}")
+        if self.canvas_shape_hw != expected_canvas:
+            raise ValueError(f"layout {self.layout_id!r} requires canvas_shape_hw={expected_canvas!r}")
+        if self.layout_id == "vertical_pair" and self.missing_view_policy != "error":
+            raise ValueError("vertical_pair requires both real views; missing_view_policy must be 'error'")
         if not self.description.strip():
             raise ValueError("observation description must not be empty")
         return self
@@ -214,6 +229,7 @@ class DatasetSourceDescription(_StrictModel):
     source_quaternion_order: Literal["xyzw", "wxyz"] | None = None
     source_gripper_index: int | None = pydantic.Field(default=None, ge=0)
     source_target_offset: int = pydantic.Field(default=0, ge=0)
+    episode_indices: tuple[int, ...] | None = None
     description: str
     view_description: str
 
@@ -239,6 +255,13 @@ class DatasetSourceDescription(_StrictModel):
             raise ValueError("source_quaternion_order requires source_frame")
         if self.source_gripper_index is None and self.source_target_offset != 0:
             raise ValueError("source_target_offset requires source_gripper_index")
+        if self.episode_indices is not None:
+            if not self.episode_indices:
+                raise ValueError("episode_indices must be null or a non-empty tuple")
+            if any(index < 0 for index in self.episode_indices):
+                raise ValueError("episode_indices must be non-negative")
+            if tuple(sorted(set(self.episode_indices))) != self.episode_indices:
+                raise ValueError("episode_indices must be sorted and unique")
         return self
 
 
@@ -278,6 +301,8 @@ class ActionPolicyManifest(_StrictModel):
             )
         if self.model_action_dim > self.transform.max_action_dim:
             raise ValueError("model action width must not exceed transform.max_action_dim")
+        if self.chunk_size % self.observation.video_subsample:
+            raise ValueError("chunk_size must be divisible by observation.video_subsample")
         if self.model_action.codec == self.wire_action.codec == "joint_position":
             if self.model_action.layout != self.wire_action.layout:
                 raise ValueError("action-policy schema v1 requires identical joint-position model and wire layouts")
@@ -317,6 +342,16 @@ class ActionPolicyManifest(_StrictModel):
                 raise ValueError(
                     f"dataset source {source.name!r} conditioning does not match the model conditioning rows"
                 )
+            source_roles = set(source.camera_features)
+            declared_roles = set(self.observation.view_roles)
+            if not source_roles <= declared_roles:
+                raise ValueError(
+                    f"dataset source {source.name!r} uses camera roles outside the observation layout"
+                )
+            if self.observation.missing_view_policy == "error" and source_roles != declared_roles:
+                raise ValueError(
+                    f"dataset source {source.name!r} must provide every declared observation role"
+                )
         return self
 
     @property
@@ -326,6 +361,10 @@ class ActionPolicyManifest(_StrictModel):
     @property
     def wire_action_dim(self) -> int:
         return len(self.wire_action.layout)
+
+    @property
+    def video_frames(self) -> int:
+        return self.chunk_size // self.observation.video_subsample + 1
 
     def resolve_dataset_source(self, name: str | None = None) -> DatasetSourceDescription:
         """Resolve the one source contract selected for a serving process."""
@@ -374,6 +413,7 @@ class ActionPolicyManifest(_StrictModel):
                 "view_shape_hw": list(self.observation.view_shape_hw),
                 "canvas_shape_hw": list(self.observation.canvas_shape_hw),
                 "view_roles": list(self.observation.view_roles),
+                "video_subsample": self.observation.video_subsample,
                 "missing_view_policy": self.observation.missing_view_policy,
                 "viewpoint": self.observation.viewpoint,
                 "description": self.observation.description,
@@ -394,7 +434,9 @@ class ActionPolicyManifest(_StrictModel):
             "requires_dataset_source": len(self.datasets) > 1,
             "dataset_source": selected_source.name,
             "source_view_description": selected_source.view_description,
-            "present_view_roles": [role for role in OBSERVATION_VIEW_SLOTS if role in selected_source.camera_features],
+            "present_view_roles": [
+                role for role in self.observation.view_roles if role in selected_source.camera_features
+            ],
         }
 
 
@@ -473,7 +515,7 @@ def validate_training_manifest_alignment(config: Any, manifest: ActionPolicyMani
         )
     tokenizer = _config_value(model_config, "tokenizer")
     exact_durations = _config_value(tokenizer, "encode_exact_durations", _CONFIG_MISSING)
-    expected_durations = [manifest.chunk_size + 1]
+    expected_durations = [manifest.video_frames]
     if exact_durations is _CONFIG_MISSING or list(exact_durations) != expected_durations:
         raise ValueError(
             f"action_policy.chunk_size={manifest.chunk_size} requires model tokenizer "
@@ -501,6 +543,26 @@ def validate_training_manifest_alignment(config: Any, manifest: ActionPolicyMani
             raise ValueError(f"resolved action dataset factory does not expose manifest-bound field {field!r}")
         if actual != expected:
             raise ValueError(f"action_policy.{field}={expected!r} does not match resolved dataset value {actual!r}")
+
+    parameters = _factory_parameters(dataset)
+    if "video_subsample" in parameters:
+        actual_video_subsample = _config_value(dataset, "video_subsample", _CONFIG_MISSING)
+        if actual_video_subsample != manifest.observation.video_subsample:
+            raise ValueError(
+                "action_policy.observation.video_subsample="
+                f"{manifest.observation.video_subsample!r} does not match resolved dataset "
+                f"video_subsample={actual_video_subsample!r}"
+            )
+    elif manifest.observation.video_subsample != 1:
+        raise ValueError("manifest-bound action dataset factory does not support video_subsample")
+    if "apply_forward_clamp" in parameters:
+        actual_forward_clamp = _config_value(dataset, "apply_forward_clamp", _CONFIG_MISSING)
+        if actual_forward_clamp != manifest.normalization.apply_forward_clamp:
+            raise ValueError(
+                "action_policy.normalization.apply_forward_clamp="
+                f"{manifest.normalization.apply_forward_clamp!r} does not match resolved dataset "
+                f"apply_forward_clamp={actual_forward_clamp!r}"
+            )
 
     action_normalization = _config_value(dataset, "action_normalization")
     expected_normalization = None if manifest.normalization.kind == "none" else manifest.normalization.kind
@@ -617,7 +679,7 @@ def bind_manifest_to_training_config(config: Any, manifest: ActionPolicyManifest
     tokenizer = _config_value(_config_value(_config_value(config, "model"), "config"), "tokenizer")
     if tokenizer is None:
         raise ValueError("manifest-bound action training requires model.config.tokenizer")
-    _set_config_value(tokenizer, "encode_exact_durations", [manifest.chunk_size + 1])
+    _set_config_value(tokenizer, "encode_exact_durations", [manifest.video_frames])
     parameters = _factory_parameters(dataset)
     _bind_required_factory_values(
         dataset,
@@ -638,6 +700,10 @@ def bind_manifest_to_training_config(config: Any, manifest: ActionPolicyManifest
             "format_prompt_as_json": manifest.transform.format_prompt_as_json,
         },
     )
+    if "video_subsample" in parameters:
+        _set_config_value(dataset, "video_subsample", manifest.observation.video_subsample)
+    if "apply_forward_clamp" in parameters:
+        _set_config_value(dataset, "apply_forward_clamp", manifest.normalization.apply_forward_clamp)
 
     if "sources" not in parameters:
         if len(manifest.datasets) != 1:

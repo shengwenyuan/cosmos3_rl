@@ -110,6 +110,7 @@ def make_config() -> Config:
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robomind_ur5_dual_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_robomind_ur5_single_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_ur5_single_eef_nano  # noqa: F401, E501
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_ur5_single_joint_edge  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_ur5_single_joint_nano  # noqa: F401, E501
     import cosmos_framework.configs.base.experiment.sft.vision_sft_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.sft.vision_sft_nano  # noqa: F401

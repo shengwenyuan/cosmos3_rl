@@ -146,7 +146,54 @@ def test_public_factory_forwards_source_contract(monkeypatch):
     monkeypatch.setattr(ur5_dataset, "UR5SingleLeRobotDataset", FakeDataset)
     source = _source()
     ur5_dataset.get_action_ur5_single_sft_dataset(
-        sources=[source], sample_stride=8, tokenizer_config=None, iterable_shuffle=False
+        sources=[source],
+        sample_stride=8,
+        video_subsample=2,
+        action_stats_path="/tmp/stats.json",
+        apply_forward_clamp=True,
+        tokenizer_config=None,
+        iterable_shuffle=False,
     )
     assert captured["sources"] == [source]
     assert captured["sample_stride"] == 8
+    assert captured["video_subsample"] == 2
+    assert captured["action_stats_path"] == "/tmp/stats.json"
+    assert captured["apply_forward_clamp"] is True
+
+
+def test_vertical_pair_canvas_has_two_real_views(monkeypatch):
+    dataset = object.__new__(ur5_dataset.UR5SingleLeRobotDataset)
+    dataset._skip_video_loading = False
+    source = _source(
+        canvas_layout="vertical_pair",
+        camera_features={"primary": _CAMERAS[0], "aux_left": _CAMERAS[1]},
+        decode_size_hw=None,
+    )
+    top = torch.zeros(2, 3, 360, 640)
+    bottom = torch.ones(2, 3, 360, 640)
+    sample = {_CAMERAS[0]: top, _CAMERAS[1]: bottom}
+
+    canvas = dataset._compose_canvas(sample, source)
+
+    assert canvas.shape == (2, 3, 720, 640)
+    torch.testing.assert_close(canvas[:, :, :360], top)
+    torch.testing.assert_close(canvas[:, :, 360:], bottom)
+
+
+def test_vertical_pair_requires_both_declared_roles():
+    features = {"action": {"dtype": "float32", "shape": [7], "names": {"motors": _ACTION_LAYOUT}}}
+    with pytest.raises(ValueError, match="exactly the primary and aux_left"):
+        ur5_dataset._validate_source(
+            _meta(features),
+            _source(canvas_layout="vertical_pair", camera_features={"primary": _CAMERAS[0]}),
+            fps=15.0,
+        )
+
+
+def test_episode_selection_is_sorted_and_strict():
+    dataset = object.__new__(ur5_dataset.UR5SingleLeRobotDataset)
+    dataset._selected_episode_indices = frozenset((1, 3))
+
+    assert dataset._filter_valid_episodes(None, [0, 1, 2, 3]) == [1, 3]
+    with pytest.raises(ValueError, match="unavailable"):
+        dataset._filter_valid_episodes(None, [0, 1, 2])

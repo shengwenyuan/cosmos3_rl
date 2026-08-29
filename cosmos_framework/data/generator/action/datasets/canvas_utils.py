@@ -21,6 +21,16 @@ def zero_like_view(reference: torch.Tensor) -> torch.Tensor:
     return torch.zeros_like(reference)
 
 
+def concat_vertical_pair_canvas(top: torch.Tensor, bottom: torch.Tensor) -> torch.Tensor:
+    """Stack two equally sized views without inventing a missing camera slot."""
+    if tuple(top.shape) != tuple(bottom.shape):
+        raise ValueError(
+            "Vertical-pair views must have identical [T,C,H,W] shapes, "
+            f"got {tuple(top.shape)} and {tuple(bottom.shape)}."
+        )
+    return torch.cat((top, bottom), dim=-2)
+
+
 def concat_three_view_canvas(top: torch.Tensor, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     """Build the fixed DROID/Cosmos three-view canvas.
 
