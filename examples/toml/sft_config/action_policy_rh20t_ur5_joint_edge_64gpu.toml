@@ -6,7 +6,7 @@ task       = "vfm"
 experiment = "action_policy_ur5_single_joint_edge"
 project    = "cosmos3_action_rh20t_ur5_joint"
 group      = "stage2_c32"
-name       = "rh20t_ur5_joint_edge_64gpu_full"
+name       = "rh20t_cfg4_ur5_joint_edge_64gpu_10k"
 wandb_mode = "online"
 
 [model]
@@ -30,12 +30,12 @@ vae_path = "${oc.env:WAN_VAE_PATH}"
 lr = 5.0e-5
 
 [scheduler]
-cycle_lengths = [23500]
+cycle_lengths = [10000]
 f_min         = [0.1]
 warm_up_steps = [500]
 
 [trainer]
-max_iter        = 23500
+max_iter        = 10000
 logging_iter    = 10
 grad_accum_iter = 8
 
