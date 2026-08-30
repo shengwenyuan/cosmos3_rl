@@ -102,7 +102,9 @@ def _manifest(
     )
 
 
-def _service_config(manifest: ActionPolicyManifest) -> robolab_server.RobolabPolicyConfig:
+def _service_config(
+    manifest: ActionPolicyManifest, *, action_normalization_depth: int = 1
+) -> robolab_server.RobolabPolicyConfig:
     return robolab_server.RobolabPolicyConfig(
         checkpoint_path="/unused/model",
         manifest=manifest,
@@ -114,6 +116,7 @@ def _service_config(manifest: ActionPolicyManifest) -> robolab_server.RobolabPol
         guidance_interval=None,
         num_steps=4,
         shift=5.0,
+        action_normalization_depth=action_normalization_depth,
     )
 
 
@@ -364,6 +367,44 @@ def test_rh20t_vertical_pair_contract_and_joint_response() -> None:
     assert tuple(contract["action_layout"]) == manifest.wire_action.layout
     assert result["action"].shape == (32, 7)
     np.testing.assert_allclose(result["action"], model_action[1:].numpy())
+
+
+def test_legacy_depth_two_normalizes_condition_and_denormalizes_output_twice() -> None:
+    class OffsetNormalizer:
+        @staticmethod
+        def normalize_action(action: torch.Tensor) -> torch.Tensor:
+            return action + 10.0
+
+        @staticmethod
+        def denormalize_action(action: torch.Tensor) -> torch.Tensor:
+            return action - 10.0
+
+    manifest = _rh20t_manifest()
+    service = object.__new__(robolab_server.RobolabPolicyService)
+    service.cfg = _service_config(manifest, action_normalization_depth=2)
+    service._action_normalizer = OffsetNormalizer()
+    service._lock = threading.Lock()
+    service._rng = np.random.default_rng(0)
+
+    def transform(sample, resolution, action_normalizer=None):
+        sample["action"] = action_normalizer.normalize_action(sample["action"])
+        return sample
+
+    service._transform = transform
+    model_action = torch.full((33, 7), 5.0)
+    service.model = SimpleNamespace(generate_samples_from_batch=lambda *args, **kwargs: {"action": [model_action]})
+    observation = {
+        "prompt": "place the object",
+        "observation/image": np.zeros((720, 640, 3), dtype=np.uint8),
+        "observation/joint_position": np.zeros(6, dtype=np.float32),
+        "observation/gripper_position": np.zeros(1, dtype=np.float32),
+    }
+
+    sample = service._build_sample(observation)
+    result = service.infer(observation)
+
+    torch.testing.assert_close(sample["action"][0], torch.full((7,), 20.0))
+    np.testing.assert_allclose(result["action"], -5.0)
 
 
 def test_server_requires_client_composed_observation_canvas() -> None:

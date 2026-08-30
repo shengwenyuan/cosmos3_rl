@@ -12,6 +12,7 @@ from cosmos_framework.data.generator.action.datasets.action_sft_dataset import (
     ActionSFTDataset,
     _validate_droid_action_policy_manifest,
 )
+from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot import BaseActionLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset import DROIDLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset_config import (
     COSMOS3_DROID_SUCCESS_PROFILE,
@@ -46,6 +47,22 @@ def test_map_wrapper_forwards_source_action_normalizer() -> None:
 
     assert ActionSFTDataset(Source(), transform, "480")[0] is sample
     assert captured == {"value": sample, "resolution": "480", "action_normalizer": normalizer}
+
+
+def test_base_dataset_keeps_action_raw_for_transform_time_normalization() -> None:
+    class FailingNormalizer:
+        def normalize_action(self, action):
+            raise AssertionError("dataset must not normalize before ActionProcessor")
+
+    dataset = object.__new__(BaseActionLeRobotDataset)
+    dataset._action_normalizer = FailingNormalizer()
+    dataset._skip_video_loading = True
+    dataset._compute_idle_frames = lambda action: None
+    action = torch.tensor([[1.0, 2.0]])
+
+    result = dataset._build_result(mode="wam", video=None, action=action, ai_caption="test")
+
+    torch.testing.assert_close(result["action"], action)
 
 
 def test_public_droid_profile_has_explicit_source_and_model_gripper_semantics() -> None:

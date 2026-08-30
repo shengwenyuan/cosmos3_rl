@@ -171,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=30)
     parser.add_argument("--guidance", type=float, default=1.0)
+    parser.add_argument("--action-normalization-depth", type=int, choices=(1, 2), default=1)
     parser.add_argument("--execute-horizon", type=int, default=8)
     parser.add_argument("--video-backend", default="torchcodec")
     parser.add_argument("--output", type=Path)
@@ -218,6 +219,7 @@ def main() -> None:
             deterministic_seed=True,
             guidance=args.guidance,
             num_steps=args.num_steps,
+            action_normalization_depth=args.action_normalization_depth,
         )
     )
 
@@ -261,6 +263,7 @@ def main() -> None:
             "seed": args.seed,
             "num_steps": args.num_steps,
             "guidance": args.guidance,
+            "action_normalization_depth": args.action_normalization_depth,
             "indices": indices,
             "categories": dict(sorted(categories.items())),
         }

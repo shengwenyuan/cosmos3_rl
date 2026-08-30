@@ -329,6 +329,7 @@ class RobolabPolicyConfig:
     guidance_interval: GuidanceInterval | None
     num_steps: int
     shift: float
+    action_normalization_depth: Literal[1, 2]
 
     @property
     def conditioning_fps(self) -> int:
@@ -423,6 +424,8 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Number of denoising steps."""
     shift: float = 5.0
     """UniPC sampler shift."""
+    action_normalization_depth: Literal[1, 2] = 1
+    """Use 2 only for legacy checkpoints trained with dataset- and transform-level action normalization."""
 
 
 def _build_policy_contract(config: RobolabPolicyConfig) -> dict[str, Any]:
@@ -474,8 +477,11 @@ class RobolabPolicyService:
             guidance_interval=args.guidance_interval,
             num_steps=int(args.num_steps),
             shift=float(args.shift),
+            action_normalization_depth=args.action_normalization_depth,
         )
         self._action_normalizer = self._load_action_normalizer(manifest, manifest_path)
+        if self.cfg.action_normalization_depth == 2 and self._action_normalizer is None:
+            raise ValueError("action_normalization_depth=2 requires an action normalizer")
         self._transform = self._build_transform(manifest)
 
         self._lock = threading.Lock()
@@ -489,6 +495,7 @@ class RobolabPolicyService:
             f"image={self.cfg.image_height}x{self.cfg.image_width} fps={self.cfg.conditioning_fps} "
             f"guidance={self.cfg.guidance} guidance_interval={self.cfg.guidance_interval} "
             f"num_steps={self.cfg.num_steps} shift={self.cfg.shift} "
+            f"action_normalization_depth={self.cfg.action_normalization_depth} "
             f"seed={self.cfg.seed} deterministic_seed={self.cfg.deterministic_seed} "
             f"model_gripper={manifest.model_action.gripper.semantics} "
             f"wire_gripper={manifest.wire_action.gripper.semantics}"
@@ -620,6 +627,12 @@ class RobolabPolicyService:
         else:
             raise ValueError(f"Unsupported model action codec {self.cfg.action_space!r}")
 
+        if self.cfg.action_normalization_depth == 2:
+            assert self._action_normalizer is not None
+            action = self._action_normalizer.normalize_action(action)
+            if history_action is not None:
+                history_action = self._action_normalizer.normalize_action(history_action)
+
         sample: dict[str, Any] = {
             "ai_caption": prompt,
             "video": video,
@@ -663,15 +676,18 @@ class RobolabPolicyService:
                 )
         generate_elapsed = time.perf_counter() - generate_start
 
-        # ``generate_samples_from_batch`` already externalizes the action with
-        # the batch's ActionProcessingRecord (unpad + denormalize). Reapplying
-        # ActionProcessor here would denormalize affine policies twice.
+        # ``generate_samples_from_batch`` applies the standard one-pass inverse
+        # recorded by ActionProcessor. Legacy depth-2 checkpoints need exactly
+        # one additional inverse to mirror their historical training target.
         action = samples["action"][0]
         if action.ndim != 2 or action.shape[-1] != self.cfg.action_dim:
             raise RuntimeError(
                 "Model returned a non-externalized action: "
                 f"expected [T,{self.cfg.action_dim}], got {tuple(action.shape)}"
             )
+        if self.cfg.action_normalization_depth == 2:
+            assert self._action_normalizer is not None
+            action = self._action_normalizer.denormalize_action(action)
         action = action[self.cfg.history_length :]  # [T2,D]
         if action.shape[0] != self.cfg.action_chunk_size:
             raise RuntimeError(
