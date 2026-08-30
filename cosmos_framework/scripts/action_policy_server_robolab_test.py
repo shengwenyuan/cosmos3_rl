@@ -404,7 +404,8 @@ def test_legacy_depth_two_normalizes_condition_and_denormalizes_output_twice() -
     result = service.infer(observation)
 
     torch.testing.assert_close(sample["action"][0], torch.full((7,), 20.0))
-    np.testing.assert_allclose(result["action"], -5.0)
+    np.testing.assert_allclose(result["action"][:, :-1], -5.0)
+    np.testing.assert_allclose(result["action"][:, -1], 0.0)
 
 
 def test_server_requires_client_composed_observation_canvas() -> None:

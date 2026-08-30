@@ -696,10 +696,14 @@ class RobolabPolicyService:
             )
         action_np = action.detach().cpu().numpy()  # [T2,D]
         model_gripper_index = self.cfg.manifest.model_action.gripper.index
-        action_np[:, model_gripper_index] = _convert_gripper_semantics(
-            action_np[:, model_gripper_index],
-            self.cfg.manifest.model_action.gripper.semantics,
-            self.cfg.manifest.wire_action.gripper.semantics,
+        action_np[:, model_gripper_index] = np.clip(
+            _convert_gripper_semantics(
+                action_np[:, model_gripper_index],
+                self.cfg.manifest.model_action.gripper.semantics,
+                self.cfg.manifest.wire_action.gripper.semantics,
+            ),
+            0.0,
+            1.0,
         )
 
         if self.cfg.action_space == "eef_delta":
