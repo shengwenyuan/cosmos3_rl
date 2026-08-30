@@ -346,16 +346,18 @@ def test_rh20t_vertical_pair_contract_and_joint_response() -> None:
 
     model_action = torch.linspace(0.0, 1.0, 33 * 7, dtype=torch.float32).reshape(33, 7)
     service.model = SimpleNamespace(generate_samples_from_batch=lambda *args, **kwargs: {"action": [model_action]})
-    result = service.infer(
-        {
-            "prompt": "place the object",
-            "observation/image": np.zeros((720, 640, 3), dtype=np.uint8),
-            "observation/joint_position": np.zeros(6, dtype=np.float32),
-            "observation/gripper_position": np.zeros(1, dtype=np.float32),
-        }
-    )
+    observation = {
+        "prompt": "place the object",
+        "observation/image": np.zeros((720, 640, 3), dtype=np.uint8),
+        "observation/joint_position": np.zeros(6, dtype=np.float32),
+        "observation/gripper_position": np.zeros(1, dtype=np.float32),
+    }
+    sample = service._build_sample(observation)
+    result = service.infer(observation)
 
     contract = robolab_server._build_policy_contract(service.cfg)
+    assert sample["video"].shape == (3, 17, 720, 640)
+    assert sample["action"].shape == (33, 7)
     assert contract["observation"]["layout_id"] == "vertical_pair"
     assert contract["observation"]["canvas_shape_hw"] == [720, 640]
     assert contract["present_view_roles"] == ["primary", "aux_left"]

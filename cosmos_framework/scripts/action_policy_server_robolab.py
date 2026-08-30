@@ -343,6 +343,10 @@ class RobolabPolicyConfig:
         return self.manifest.chunk_size
 
     @property
+    def video_frames(self) -> int:
+        return self.manifest.video_frames
+
+    @property
     def action_dim(self) -> int:
         return self.manifest.model_action_dim
 
@@ -569,7 +573,7 @@ class RobolabPolicyService:
         image_w = self.cfg.image_width
         if image.shape[:2] != (image_h, image_w):
             image = _resize_rgb_uint8(image, (image_h, image_w))
-        t_frames = self.cfg.action_chunk_size + 1
+        t_frames = self.cfg.video_frames
         video = torch.zeros((3, t_frames, image_h, image_w), dtype=torch.uint8)  # [3,T,H,W]
         video[:, 0] = torch.from_numpy(image.copy()).permute(2, 0, 1)  # [3,H,W]
 
