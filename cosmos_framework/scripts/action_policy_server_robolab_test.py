@@ -65,7 +65,7 @@ def _manifest(
                 "timing": "row 0 is current state; remaining rows are future targets",
             },
             "observation": {
-                "layout_id": "test_three_view",
+                "layout_id": "primary_top_aux_bottom_pair",
                 "view_shape_hw": [3, 5],
                 "canvas_shape_hw": [4, 5],
                 "view_roles": ["primary", "aux_left", "aux_right"],
@@ -163,6 +163,45 @@ def _eef_manifest() -> ActionPolicyManifest:
         action_features=["observation.state", "action"],
         state_features=[],
         action_layout=raw["model_action"]["layout"],
+    )
+    return ActionPolicyManifest.model_validate(raw)
+
+
+def _rh20t_manifest() -> ActionPolicyManifest:
+    raw = _manifest(history_rows=1).model_dump(mode="json")
+    raw.update(profile_id="rh20t_cfg4_ur5_joint_ext2_15hz_c32_v1", chunk_size=32)
+    layout = [
+        "shoulder_pan_joint",
+        "shoulder_lift_joint",
+        "elbow_joint",
+        "wrist_1_joint",
+        "wrist_2_joint",
+        "wrist_3_joint",
+        "gripper",
+    ]
+    raw["model_action"]["layout"] = layout
+    raw["wire_action"]["layout"] = layout
+    raw["observation"] = {
+        "layout_id": "vertical_pair",
+        "view_shape_hw": [360, 640],
+        "canvas_shape_hw": [720, 640],
+        "view_roles": ["primary", "aux_left"],
+        "video_subsample": 2,
+        "missing_view_policy": "error",
+        "viewpoint": "concat_view",
+        "description": "Exterior camera 1 is above exterior camera 2.",
+    }
+    raw["datasets"][0].update(
+        name="rh20t_cfg4_ur5_joint_ext2_15hz_v1",
+        condition_source="observation_state_t0",
+        action_features=["action"],
+        state_features=["observation.state.joint", "observation.state.gripper"],
+        camera_features={
+            "primary": "observation.images.exterior_1",
+            "aux_left": "observation.images.exterior_2",
+        },
+        action_layout=[*layout[:-1], "gripper_close_fraction"],
+        view_description="The top view is exterior camera 1. The bottom view is exterior camera 2.",
     )
     return ActionPolicyManifest.model_validate(raw)
 
@@ -280,7 +319,7 @@ def test_policy_contract_is_manifest_driven_and_allows_arbitrary_robot_name() ->
     assert contract["robot"] == "future_arm"
     assert contract["action_layout"][-1] == "gripper"
     assert contract["gripper_semantics"] == "close_fraction"
-    assert contract["observation"]["layout_id"] == "test_three_view"
+    assert contract["observation"]["layout_id"] == "primary_top_aux_bottom_pair"
     assert contract["conditioning"]["history_rows"] == 1
     assert contract["dataset_source"] == "test"
     assert contract["source_view_description"] == "custom wrist camera and two shoulder views"
@@ -294,6 +333,35 @@ def test_build_transform_uses_manifest_not_training_dataloader() -> None:
     assert transform.max_action_dim == 64
     assert transform.prompt_json_formatter is not None
     assert transform.text_tokenizer is None
+
+
+def test_rh20t_vertical_pair_contract_and_joint_response() -> None:
+    manifest = _rh20t_manifest()
+    service = object.__new__(robolab_server.RobolabPolicyService)
+    service.cfg = _service_config(manifest)
+    service._action_normalizer = None
+    service._lock = threading.Lock()
+    service._rng = np.random.default_rng(0)
+    service._transform = lambda sample, resolution, action_normalizer=None: sample
+
+    model_action = torch.linspace(0.0, 1.0, 33 * 7, dtype=torch.float32).reshape(33, 7)
+    service.model = SimpleNamespace(generate_samples_from_batch=lambda *args, **kwargs: {"action": [model_action]})
+    result = service.infer(
+        {
+            "prompt": "place the object",
+            "observation/image": np.zeros((720, 640, 3), dtype=np.uint8),
+            "observation/joint_position": np.zeros(6, dtype=np.float32),
+            "observation/gripper_position": np.zeros(1, dtype=np.float32),
+        }
+    )
+
+    contract = robolab_server._build_policy_contract(service.cfg)
+    assert contract["observation"]["layout_id"] == "vertical_pair"
+    assert contract["observation"]["canvas_shape_hw"] == [720, 640]
+    assert contract["present_view_roles"] == ["primary", "aux_left"]
+    assert tuple(contract["action_layout"]) == manifest.wire_action.layout
+    assert result["action"].shape == (32, 7)
+    np.testing.assert_allclose(result["action"], model_action[1:].numpy())
 
 
 def test_server_requires_client_composed_observation_canvas() -> None:
