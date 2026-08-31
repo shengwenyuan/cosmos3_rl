@@ -3,6 +3,8 @@
 日期：2026-08-25
 背景：DROID EEF Stage 1 v1 的训练链路完成，但离线分布与 RoboLab 行为 gate 失败；历史 Cosmos3-Nano MT→EEF 实验也长期不理想。
 
+实测更新（2026-08-31）：Stage 2-J 首轮 as-built 基线采用 absolute joint、固定 15 Hz、chunk/predict/execute=`32/32/8` 并训练至 iter10000。验收结果见 `rh20t_cfg4_stage2_joint_iter10000_validation_report.md`；本文件下述 chunk 16 仅保留为早期建议与后续消融，不再代表首轮实配。
+
 ## 1. BEHAVIOR1K Action SFT 参考记录
 
 参考：`cosmos3-behavior1k-sft-v0-dejie-20260815.md`。
