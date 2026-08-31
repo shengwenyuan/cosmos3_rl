@@ -61,3 +61,25 @@ def test_gate_report_is_json_serializable(tmp_path: Path) -> None:
 
     output.write_text(json.dumps(report), encoding="utf-8")
     assert json.loads(output.read_text(encoding="utf-8"))["passed"] is True
+
+
+def test_gripper_tolerance_records_nominal_overshoot_and_rejects_hard_overshoot() -> None:
+    current = np.zeros((1, 7), dtype=np.float32)
+    target = np.zeros((1, 32, 7), dtype=np.float32)
+    slight_overshoot = target.copy()
+    slight_overshoot[..., 6] = 1.02
+
+    tolerated = evaluate_arrays(current, slight_overshoot, target)
+
+    assert tolerated["passed"]
+    assert tolerated["counts"]["gripper_nominal_range_violations"] == 32
+    assert tolerated["counts"]["gripper_range_violations"] == 0
+    assert tolerated["gripper_prediction"]["max"] == np.float32(1.02)
+
+    hard_overshoot = slight_overshoot.copy()
+    hard_overshoot[..., 6] = 1.06
+    rejected = evaluate_arrays(current, hard_overshoot, target)
+
+    assert not rejected["passed"]
+    assert rejected["counts"]["gripper_range_violations"] == 32
+    assert "gripper_range_violation" in rejected["failures"]

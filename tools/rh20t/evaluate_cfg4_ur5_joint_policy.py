@@ -18,6 +18,7 @@ DEFAULT_RUN = Path(
 )
 JOINT_LOWER = np.array([-2 * np.pi, -2 * np.pi, -np.pi, -2 * np.pi, -2 * np.pi, -2 * np.pi])
 JOINT_UPPER = -JOINT_LOWER
+DEFAULT_GRIPPER_TOLERANCE = 0.05
 
 
 def select_indices(length: int, count: int, seed: int) -> list[int]:
@@ -93,6 +94,7 @@ def evaluate_arrays(
     max_velocity_rad_s: float = 3.2,
     max_acceleration_rad_s2: float = 20.0,
     max_p99_scale_ratio: float = 3.0,
+    gripper_tolerance: float = DEFAULT_GRIPPER_TOLERANCE,
 ) -> dict[str, Any]:
     current = np.asarray(current, dtype=np.float32)
     prediction = np.asarray(prediction, dtype=np.float32)
@@ -103,11 +105,17 @@ def evaluate_arrays(
         raise ValueError(f"prediction/target shape mismatch: {prediction.shape} vs {target.shape}")
     if prediction.shape[2] != 7:
         raise ValueError(f"prediction must be 7-D, got {prediction.shape}")
+    if gripper_tolerance < 0.0:
+        raise ValueError("gripper_tolerance must be non-negative")
 
     finite = bool(np.isfinite(prediction).all())
     joint = prediction[..., :6]
     limit_violations = int(np.count_nonzero((joint < JOINT_LOWER) | (joint > JOINT_UPPER)))
-    gripper_violations = int(np.count_nonzero((prediction[..., 6] < 0.0) | (prediction[..., 6] > 1.0)))
+    gripper = prediction[..., 6]
+    gripper_nominal_violations = int(np.count_nonzero((gripper < 0.0) | (gripper > 1.0)))
+    gripper_violations = int(
+        np.count_nonzero((gripper < -gripper_tolerance) | (gripper > 1.0 + gripper_tolerance))
+    )
     predicted_motion = _motion_summary(current, prediction, fps, execute_horizon)
     target_motion = _motion_summary(current, target, fps, execute_horizon)
     target_p99 = target_motion["step_abs_rad"]["p99"]
@@ -132,6 +140,7 @@ def evaluate_arrays(
         "counts": {
             "windows": int(len(current)),
             "joint_limit_violations": limit_violations,
+            "gripper_nominal_range_violations": gripper_nominal_violations,
             "gripper_range_violations": gripper_violations,
         },
         "thresholds": {
@@ -139,6 +148,11 @@ def evaluate_arrays(
             "max_velocity_rad_s": max_velocity_rad_s,
             "max_acceleration_rad_s2": max_acceleration_rad_s2,
             "max_p99_scale_ratio": max_p99_scale_ratio,
+            "gripper_tolerance": gripper_tolerance,
+        },
+        "gripper_prediction": {
+            "min": float(gripper.min()),
+            "max": float(gripper.max()),
         },
         "prediction": predicted_motion,
         "target": target_motion,
@@ -172,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-steps", type=int, default=30)
     parser.add_argument("--guidance", type=float, default=1.0)
     parser.add_argument("--action-normalization-depth", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--gripper-tolerance", type=float, default=DEFAULT_GRIPPER_TOLERANCE)
     parser.add_argument("--execute-horizon", type=int, default=8)
     parser.add_argument("--video-backend", default="torchcodec")
     parser.add_argument("--output", type=Path)
@@ -249,13 +264,19 @@ def main() -> None:
         targets.append(target)
         print(f"[{ordinal:03d}/{len(indices):03d}] index={index} category={category}", flush=True)
 
+    current_array = np.stack(current_rows)
+    prediction_array = np.stack(predictions)
+    target_array = np.stack(targets)
     report = evaluate_arrays(
-        np.stack(current_rows),
-        np.stack(predictions),
-        np.stack(targets),
+        current_array,
+        prediction_array,
+        target_array,
         fps=manifest.policy_fps,
         execute_horizon=args.execute_horizon,
+        gripper_tolerance=args.gripper_tolerance,
     )
+    output = args.output or args.run / "evaluation" / f"iter_{args.iteration:09d}" / "offline_gate.json"
+    samples_output = output.with_name(f"{output.stem}_samples.npz")
     report.update(
         {
             "profile_id": manifest.profile_id,
@@ -266,10 +287,17 @@ def main() -> None:
             "action_normalization_depth": args.action_normalization_depth,
             "indices": indices,
             "categories": dict(sorted(categories.items())),
+            "raw_samples": str(samples_output),
         }
     )
-    output = args.output or args.run / "evaluation" / f"iter_{args.iteration:09d}" / "offline_gate.json"
     output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        samples_output,
+        indices=np.asarray(indices, dtype=np.int64),
+        current=current_array,
+        prediction=prediction_array,
+        target=target_array,
+    )
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
     print(f"report={output}")
