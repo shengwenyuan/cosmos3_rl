@@ -30,6 +30,7 @@ from cosmos_framework.inference.common.init import init_script
 init_script()
 
 import hashlib
+import http
 import json
 import os
 import socket
@@ -44,6 +45,7 @@ import pydantic
 import torch
 import torch.nn.functional as F
 import tyro
+import websockets.asyncio.server as websocket_server
 
 from cosmos_framework.data.generator.action.policy_schema import (
     ActionPolicyManifest,
@@ -349,6 +351,34 @@ def _load_openpi_websocket_policy_server() -> type[Any]:
     return WebsocketPolicyServer
 
 
+def _websocket_health_check(connection: Any, request: Any) -> Any | None:
+    if request.path == "/healthz":
+        return connection.respond(http.HTTPStatus.OK, "OK\n")
+    return None
+
+
+def _with_websocket_keepalive(
+    server_cls: type[Any], *, ping_interval_s: float | None, ping_timeout_s: float | None
+) -> type[Any]:
+    """Configure OpenPI serving without changing its wire protocol or handler."""
+
+    class ConfiguredWebsocketPolicyServer(server_cls):
+        async def run(self) -> None:
+            async with websocket_server.serve(
+                self._handler,
+                self._host,
+                self._port,
+                compression=None,
+                max_size=None,
+                process_request=_websocket_health_check,
+                ping_interval=ping_interval_s,
+                ping_timeout=ping_timeout_s,
+            ) as server:
+                await server.serve_forever()
+
+    return ConfiguredWebsocketPolicyServer
+
+
 @dataclass(frozen=True)
 class RobolabPolicyConfig:
     checkpoint_path: str
@@ -435,6 +465,10 @@ class RobolabServerArgs(pydantic.BaseModel):
     """WebSocket port to bind."""
     host: str = "0.0.0.0"
     """WebSocket host to bind."""
+    websocket_ping_interval_s: float | None = 20.0
+    """WebSocket keepalive interval in seconds; use None to disable protocol pings."""
+    websocket_ping_timeout_s: float | None = 120.0
+    """How long to wait for a keepalive pong; sized for blocking simulator clients."""
     decode_video: bool = False
     """If set, decode and return the predicted rollout video as a uint8 NumPy array."""
     guardrails: bool = False
@@ -790,7 +824,11 @@ def serve(args: RobolabServerArgs) -> None:
     local_ip = get_local_ip()
     log.info(f"[robolab-policy-server] Server accessible at: ws://{local_ip}:{int(args.port)}/")
     log.info(f"[robolab-policy-server] Health check: http://{local_ip}:{int(args.port)}/healthz")
-    server_cls = _load_openpi_websocket_policy_server()
+    server_cls = _with_websocket_keepalive(
+        _load_openpi_websocket_policy_server(),
+        ping_interval_s=args.websocket_ping_interval_s,
+        ping_timeout_s=args.websocket_ping_timeout_s,
+    )
     metadata = {"policy_contract": _build_policy_contract(service.cfg)}
     log.info(f"[robolab-policy-server] policy_contract={metadata['policy_contract']}")
     server_cls(policy=service, host=args.host, port=int(args.port), metadata=metadata).serve_forever()

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import threading
 from pathlib import Path
@@ -297,6 +298,38 @@ def test_load_openpi_websocket_policy_server_from_lightweight_package(monkeypatc
     assert robolab_server._load_openpi_websocket_policy_server() is FakeWebsocketPolicyServer
 
 
+def test_websocket_keepalive_wraps_openpi_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeOpenPIServer:
+        def __init__(self, policy=None, host="0.0.0.0", port=None, metadata=None):
+            self._handler = object()
+            self._host = host
+            self._port = port
+
+    class FakeServeContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def serve_forever(self):
+            captured["served"] = True
+
+    def fake_serve(handler, host, port, **kwargs):
+        captured.update(handler=handler, host=host, port=port, **kwargs)
+        return FakeServeContext()
+
+    monkeypatch.setattr(robolab_server.websocket_server, "serve", fake_serve)
+    server_cls = robolab_server._with_websocket_keepalive(FakeOpenPIServer, ping_interval_s=20.0, ping_timeout_s=120.0)
+    asyncio.run(server_cls(host="127.0.0.1", port=8000).run())
+
+    assert captured["ping_interval"] == 20.0
+    assert captured["ping_timeout"] == 120.0
+    assert captured["served"] is True
+
+
 def test_server_args_only_default_runtime_not_policy_semantics() -> None:
     args = robolab_server.RobolabServerArgs()
     assert args.checkpoint_path == "nvidia/Cosmos3-Nano-Policy-DROID"
@@ -308,6 +341,8 @@ def test_server_args_only_default_runtime_not_policy_semantics() -> None:
     assert args.guidance_interval is None
     assert args.num_steps == 4
     assert args.shift == 5.0
+    assert args.websocket_ping_interval_s == 20.0
+    assert args.websocket_ping_timeout_s == 120.0
     assert args.joint_chunk_postprocessor == "none"
     assert not hasattr(args, "robot")
     assert not hasattr(args, "gripper_invert")
