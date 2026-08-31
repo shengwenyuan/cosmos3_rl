@@ -113,9 +113,7 @@ def evaluate_arrays(
     limit_violations = int(np.count_nonzero((joint < JOINT_LOWER) | (joint > JOINT_UPPER)))
     gripper = prediction[..., 6]
     gripper_nominal_violations = int(np.count_nonzero((gripper < 0.0) | (gripper > 1.0)))
-    gripper_violations = int(
-        np.count_nonzero((gripper < -gripper_tolerance) | (gripper > 1.0 + gripper_tolerance))
-    )
+    gripper_violations = int(np.count_nonzero((gripper < -gripper_tolerance) | (gripper > 1.0 + gripper_tolerance)))
     predicted_motion = _motion_summary(current, prediction, fps, execute_horizon)
     target_motion = _motion_summary(current, target, fps, execute_horizon)
     target_p99 = target_motion["step_abs_rad"]["p99"]
@@ -158,9 +156,7 @@ def evaluate_arrays(
         "target": target_motion,
         "p99_step_scale_ratio": float(p99_scale_ratio),
         "arm_mae_rad": float(np.mean(np.abs(prediction[..., :6] - target[..., :6]))),
-        "gripper_accuracy": float(
-            np.mean((prediction[..., 6] > 0.5) == (target[..., 6] > 0.5))
-        ),
+        "gripper_accuracy": float(np.mean((prediction[..., 6] > 0.5) == (target[..., 6] > 0.5))),
     }
 
 
@@ -186,6 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-steps", type=int, default=30)
     parser.add_argument("--guidance", type=float, default=1.0)
     parser.add_argument("--action-normalization-depth", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--joint-chunk-postprocessor", choices=("none", "triangular_3tap"), default="none")
     parser.add_argument("--gripper-tolerance", type=float, default=DEFAULT_GRIPPER_TOLERANCE)
     parser.add_argument("--execute-horizon", type=int, default=8)
     parser.add_argument("--video-backend", default="torchcodec")
@@ -235,11 +232,13 @@ def main() -> None:
             guidance=args.guidance,
             num_steps=args.num_steps,
             action_normalization_depth=args.action_normalization_depth,
+            joint_chunk_postprocessor=args.joint_chunk_postprocessor,
         )
     )
 
     current_rows: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
+    raw_predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     categories: dict[str, int] = defaultdict(int)
     for ordinal, index in enumerate(indices, start=1):
@@ -257,19 +256,32 @@ def main() -> None:
             }
         )
         prediction = np.asarray(result["action"], dtype=np.float32)
+        raw_prediction = np.asarray(result.get("raw_action", result["action"]), dtype=np.float32)
         if prediction.shape != target.shape:
             raise ValueError(f"sample {index}: prediction shape {prediction.shape}, target {target.shape}")
+        if raw_prediction.shape != target.shape:
+            raise ValueError(f"sample {index}: raw prediction shape {raw_prediction.shape}, target {target.shape}")
         current_rows.append(current)
         predictions.append(prediction)
+        raw_predictions.append(raw_prediction)
         targets.append(target)
         print(f"[{ordinal:03d}/{len(indices):03d}] index={index} category={category}", flush=True)
 
     current_array = np.stack(current_rows)
     prediction_array = np.stack(predictions)
+    raw_prediction_array = np.stack(raw_predictions)
     target_array = np.stack(targets)
     report = evaluate_arrays(
         current_array,
         prediction_array,
+        target_array,
+        fps=manifest.policy_fps,
+        execute_horizon=args.execute_horizon,
+        gripper_tolerance=args.gripper_tolerance,
+    )
+    raw_prediction_gate = evaluate_arrays(
+        current_array,
+        raw_prediction_array,
         target_array,
         fps=manifest.policy_fps,
         execute_horizon=args.execute_horizon,
@@ -285,6 +297,8 @@ def main() -> None:
             "num_steps": args.num_steps,
             "guidance": args.guidance,
             "action_normalization_depth": args.action_normalization_depth,
+            "joint_chunk_postprocessor": args.joint_chunk_postprocessor,
+            "raw_prediction_gate": raw_prediction_gate,
             "indices": indices,
             "categories": dict(sorted(categories.items())),
             "raw_samples": str(samples_output),
@@ -296,6 +310,7 @@ def main() -> None:
         indices=np.asarray(indices, dtype=np.int64),
         current=current_array,
         prediction=prediction_array,
+        raw_prediction=raw_prediction_array,
         target=target_array,
     )
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

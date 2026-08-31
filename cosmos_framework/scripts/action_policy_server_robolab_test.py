@@ -103,7 +103,10 @@ def _manifest(
 
 
 def _service_config(
-    manifest: ActionPolicyManifest, *, action_normalization_depth: int = 1
+    manifest: ActionPolicyManifest,
+    *,
+    action_normalization_depth: int = 1,
+    joint_chunk_postprocessor: str = "none",
 ) -> robolab_server.RobolabPolicyConfig:
     return robolab_server.RobolabPolicyConfig(
         checkpoint_path="/unused/model",
@@ -117,6 +120,7 @@ def _service_config(
         num_steps=4,
         shift=5.0,
         action_normalization_depth=action_normalization_depth,
+        joint_chunk_postprocessor=robolab_server.JointChunkPostprocessorConfig(method=joint_chunk_postprocessor),
     )
 
 
@@ -304,6 +308,7 @@ def test_server_args_only_default_runtime_not_policy_semantics() -> None:
     assert args.guidance_interval is None
     assert args.num_steps == 4
     assert args.shift == 5.0
+    assert args.joint_chunk_postprocessor == "none"
     assert not hasattr(args, "robot")
     assert not hasattr(args, "gripper_invert")
 
@@ -327,6 +332,18 @@ def test_policy_contract_is_manifest_driven_and_allows_arbitrary_robot_name() ->
     assert contract["dataset_source"] == "test"
     assert contract["source_view_description"] == "custom wrist camera and two shoulder views"
     assert contract["present_view_roles"] == ["primary"]
+    assert contract["joint_chunk_postprocessor"] == {"method": "none"}
+
+
+def test_triangular_joint_chunk_postprocessor_anchors_current_and_preserves_gripper() -> None:
+    action = np.array([[1.0, 10.0, 0.1], [2.0, 20.0, 0.9], [4.0, 40.0, 0.2]], dtype=np.float32)
+    config = robolab_server.JointChunkPostprocessorConfig(method="triangular_3tap")
+
+    result = robolab_server.postprocess_joint_chunk(action, np.array([0.0, 0.0]), 2, config)
+
+    np.testing.assert_allclose(result[:, :2], [[1.0, 10.0], [2.25, 22.5], [3.5, 35.0]])
+    np.testing.assert_array_equal(result[:, 2], action[:, 2])
+    np.testing.assert_array_equal(action[:, :2], [[1.0, 10.0], [2.0, 20.0], [4.0, 40.0]])
 
 
 def test_build_transform_uses_manifest_not_training_dataloader() -> None:
@@ -367,6 +384,36 @@ def test_rh20t_vertical_pair_contract_and_joint_response() -> None:
     assert tuple(contract["action_layout"]) == manifest.wire_action.layout
     assert result["action"].shape == (32, 7)
     np.testing.assert_allclose(result["action"], model_action[1:].numpy())
+    assert "raw_action" not in result
+
+
+def test_joint_chunk_postprocessor_is_explicit_and_keeps_raw_model_action() -> None:
+    manifest = _rh20t_manifest()
+    service = object.__new__(robolab_server.RobolabPolicyService)
+    service.cfg = _service_config(manifest, joint_chunk_postprocessor="triangular_3tap")
+    service._action_normalizer = None
+    service._lock = threading.Lock()
+    service._rng = np.random.default_rng(0)
+    service._transform = lambda sample, resolution, action_normalizer=None: sample
+    model_action = torch.zeros((33, 7), dtype=torch.float32)
+    model_action[1:, 0] = torch.arange(1, 33, dtype=torch.float32)
+    model_action[1:, 6] = torch.arange(32, dtype=torch.float32) % 2
+    service.model = SimpleNamespace(generate_samples_from_batch=lambda *args, **kwargs: {"action": [model_action]})
+    observation = {
+        "prompt": "place the object",
+        "observation/image": np.zeros((720, 640, 3), dtype=np.uint8),
+        "observation/joint_position": np.zeros(6, dtype=np.float32),
+        "observation/gripper_position": np.zeros(1, dtype=np.float32),
+    }
+
+    result = service.infer(observation)
+
+    np.testing.assert_allclose(result["raw_action"], model_action[1:].numpy())
+    np.testing.assert_allclose(result["action"][:3, 0], [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(result["action"][:, 6], result["raw_action"][:, 6])
+    assert robolab_server._build_policy_contract(service.cfg)["joint_chunk_postprocessor"] == {
+        "method": "triangular_3tap"
+    }
 
 
 def test_legacy_depth_two_normalizes_condition_and_denormalizes_output_twice() -> None:

@@ -7,7 +7,7 @@ The server uses OpenPI's WebsocketPolicyServer and speaks its msgpack+NumPy prot
 
 - on connection, it advertises the explicit robot/action policy contract;
 - each client message is an observation dict;
-- each response is a dict with ``action`` and, when enabled, ``video``.
+- each response is a dict with ``action`` and, when enabled, ``raw_action`` or ``video``.
 
 All action, timing, gripper, and observation semantics come from the versioned
 ``action_policy.yaml`` written by training. Robot names are labels, never a
@@ -290,6 +290,38 @@ def _pack_gripper_at_index(joints: np.ndarray, gripper: np.ndarray, index: int) 
     return np.concatenate((joints[..., :index], gripper, joints[..., index:]), axis=-1)
 
 
+@dataclass(frozen=True)
+class JointChunkPostprocessorConfig:
+    method: Literal["none", "triangular_3tap"] = "none"
+
+    @property
+    def enabled(self) -> bool:
+        return self.method != "none"
+
+
+def postprocess_joint_chunk(
+    action: np.ndarray,
+    current_joint_position: np.ndarray,
+    gripper_index: int,
+    config: JointChunkPostprocessorConfig,
+) -> np.ndarray:
+    action = np.asarray(action, dtype=np.float32)
+    if action.ndim != 2 or not len(action) or not 0 <= gripper_index < action.shape[1]:
+        raise ValueError(f"Expected non-empty [T,D] joint chunk and valid gripper index, got {action.shape}")
+    if not config.enabled:
+        return action
+    joint_indices = np.arange(action.shape[1]) != gripper_index
+    joint = action[:, joint_indices]
+    current = np.asarray(current_joint_position, dtype=np.float32).reshape(-1)
+    if current.shape != (joint.shape[1],):
+        raise ValueError(f"Expected current joint position shape {(joint.shape[1],)}, got {current.shape}")
+    left = np.concatenate((current[None], joint[:-1]), axis=0)
+    right = np.concatenate((joint[1:], joint[-1:]), axis=0)
+    result = action.copy()
+    result[:, joint_indices] = 0.25 * left + 0.5 * joint + 0.25 * right
+    return result
+
+
 def _build_data_batch_from_sample(sample: dict[str, Any]) -> dict[str, Any]:
     data_batch: dict[str, Any] = {}
     for key, value in sample.items():
@@ -330,6 +362,7 @@ class RobolabPolicyConfig:
     num_steps: int
     shift: float
     action_normalization_depth: Literal[1, 2]
+    joint_chunk_postprocessor: JointChunkPostprocessorConfig
 
     @property
     def conditioning_fps(self) -> int:
@@ -426,10 +459,14 @@ class RobolabServerArgs(pydantic.BaseModel):
     """UniPC sampler shift."""
     action_normalization_depth: Literal[1, 2] = 1
     """Use 2 only for legacy checkpoints trained with dataset- and transform-level action normalization."""
+    joint_chunk_postprocessor: Literal["none", "triangular_3tap"] = "none"
+    """Optional arm-joint chunk smoothing; leaves the gripper channel unchanged."""
 
 
 def _build_policy_contract(config: RobolabPolicyConfig) -> dict[str, Any]:
-    return config.manifest.client_contract(config.dataset_source.name)
+    contract = config.manifest.client_contract(config.dataset_source.name)
+    contract["joint_chunk_postprocessor"] = {"method": config.joint_chunk_postprocessor.method}
+    return contract
 
 
 class RobolabPolicyService:
@@ -478,7 +515,10 @@ class RobolabPolicyService:
             num_steps=int(args.num_steps),
             shift=float(args.shift),
             action_normalization_depth=args.action_normalization_depth,
+            joint_chunk_postprocessor=JointChunkPostprocessorConfig(method=args.joint_chunk_postprocessor),
         )
+        if self.cfg.joint_chunk_postprocessor.enabled and self.cfg.action_space != "joint_position":
+            raise ValueError("Joint chunk postprocessing requires a joint_position policy")
         self._action_normalizer = self._load_action_normalizer(manifest, manifest_path)
         if self.cfg.action_normalization_depth == 2 and self._action_normalizer is None:
             raise ValueError("action_normalization_depth=2 requires an action normalizer")
@@ -496,6 +536,7 @@ class RobolabPolicyService:
             f"guidance={self.cfg.guidance} guidance_interval={self.cfg.guidance_interval} "
             f"num_steps={self.cfg.num_steps} shift={self.cfg.shift} "
             f"action_normalization_depth={self.cfg.action_normalization_depth} "
+            f"joint_chunk_postprocessor={self.cfg.joint_chunk_postprocessor.method} "
             f"seed={self.cfg.seed} deterministic_seed={self.cfg.deterministic_seed} "
             f"model_gripper={manifest.model_action.gripper.semantics} "
             f"wire_gripper={manifest.wire_action.gripper.semantics}"
@@ -554,9 +595,7 @@ class RobolabPolicyService:
             raise FileNotFoundError(f"Action normalization stats not found: {stats_path}")
         digest = hashlib.sha256(stats_path.read_bytes()).hexdigest()
         if digest != binding.sha256:
-            raise ValueError(
-                f"Action normalization stats hash mismatch: expected={binding.sha256}, actual={digest}"
-            )
+            raise ValueError(f"Action normalization stats hash mismatch: expected={binding.sha256}, actual={digest}")
         return load_action_normalizer(
             binding.kind,
             stats_path=stats_path,
@@ -702,6 +741,18 @@ class RobolabPolicyService:
             self.cfg.manifest.wire_action.gripper.semantics,
         )
 
+        raw_action_np = action_np.copy()
+        if self.cfg.joint_chunk_postprocessor.enabled:
+            current_joint_position = _ensure_2d_float_array(
+                obs["observation/joint_position"], "observation/joint_position", self.cfg.joint_dof
+            )[-1]
+            action_np = postprocess_joint_chunk(
+                action_np,
+                current_joint_position,
+                model_gripper_index,
+                self.cfg.joint_chunk_postprocessor,
+            )
+
         if self.cfg.action_space == "eef_delta":
             eef_pose = _ensure_2d_float_array(obs["observation/eef_pose"], "observation/eef_pose", 7)
             position, quat_xyzw = _standard_eef_delta_to_abs_eef_pose(
@@ -714,6 +765,8 @@ class RobolabPolicyService:
             action_np = np.concatenate([position, quat_xyzw, gripper], axis=-1)
 
         outputs: dict[str, Any] = {"action": action_np}
+        if self.cfg.joint_chunk_postprocessor.enabled:
+            outputs["raw_action"] = raw_action_np
         if self.cfg.decode_video:
             pred_vision_latent = samples["vision"][0]  # [C,T,H,W]
             video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]
